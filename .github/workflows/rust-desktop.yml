@@ -1,0 +1,53 @@
+name: Rust Desktop Check
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - desktop/**
+      - core/**
+      - Cargo.toml
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - desktop/**
+      - core/**
+      - Cargo.toml
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    container:
+      image: rust:1.80
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - name: Check workspace (STUB mode)
+        run: |
+          cargo check --all-targets --workspace
+
+      - name: Run core unit tests
+        run: |
+          cargo test -p yaya-core
+
+      - name: Verify no full-llama feature enabled
+        run: |
+          if cargo metadata --format-version=1 | grep -q '"full-llama"'; then
+            echo "警告: 检测到 full-llama feature，CI 将尝试编译 llama.cpp（可能因缺源码而失败）"
+          else
+            echo "确认: 未启用 full-llama feature，CI 保持 STUB 模式"
+          fi

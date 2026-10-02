@@ -1,0 +1,76 @@
+name: Proto Generation & Consistency Check
+on:
+  push:
+    paths:
+      - 'proto/**'
+      - 'scripts/gen-proto.sh'
+      - '.github/workflows/proto.yml'
+  pull_request:
+    paths:
+      - 'proto/**'
+      - 'scripts/gen-proto.sh'
+      - '.github/workflows/proto.yml'
+  workflow_dispatch:
+
+jobs:
+  proto:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Print architecture
+        run: uname -m
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Install protoc-gen-grpc-java
+        run: |
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64)  GRPC_ARCH=x86_64 ;;
+            aarch64) GRPC_ARCH=aarch_64 ;;   # 注意下划线
+            *) echo "Unsupported arch: $ARCH"; exit 1 ;;
+          esac
+          wget -q "https://repo1.maven.org/maven2/io/grpc/protoc-gen-grpc-java/1.63.0/protoc-gen-grpc-java-1.63.0-linux-${GRPC_ARCH}.exe" \
+            -O /usr/local/bin/protoc-gen-grpc-java
+          chmod +x /usr/local/bin/protoc-gen-grpc-java
+          protoc-gen-grpc-java --version || true
+
+      - name: Install protoc-gen-dart
+        run: |
+          dart pub global activate protoc_plugin
+          echo "$HOME/.pub-cache/bin" >> $GITHUB_PATH
+
+      - name: Generate proto
+        run: bash scripts/gen-proto.sh
+
+      - name: Check generated dirs exist
+        run: |
+          test -d android/app/src/main/java/com/yaya/ai/proto || { echo "Java 生成目录不存在"; exit 1; }
+          test -d lib/generated || { echo "Dart 生成目录不存在"; exit 1; }
+
+      - name: Print git status porcelain before diff check
+        run: git status --porcelain
+
+      - name: Verify generated files
+        run: |
+          if ! git diff --quiet -- android/app/src/main/java/com/yaya/ai/proto/; then
+            echo "错误: android/app/src/main/java/com/yaya/ai/proto/ 下的 proto 文件已被修改"
+            git status --porcelain -- android/app/src/main/java/com/yaya/ai/proto/
+            exit 1
+          fi
+          if ! git diff --quiet -- lib/generated/; then
+            echo "错误: lib/generated/ 下的 proto 文件已被修改"
+            git status --porcelain -- lib/generated/
+            exit 1
+          fi
+          echo "Proto 生成验证通过"
