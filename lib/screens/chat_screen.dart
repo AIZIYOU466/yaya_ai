@@ -38,7 +38,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
   Future<void> _requestPermissions() async {
     await Permission.storage.request();
-    await Permission.foregroundService.request();
   }
 
   Future<void> _sendMessage() async {

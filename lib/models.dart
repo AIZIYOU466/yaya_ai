@@ -73,7 +73,7 @@ class ChatMessage extends Equatable {
   }
 
   @override
-  List<Object> get props => [role, content, toolCalls, toolResults];
+  List<Object?> get props => [role, content, toolCalls, toolResults];
 
   @override
   String toString() => 'ChatMessage(role: $role)';

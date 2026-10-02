@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'package:dio/dio.dart';
 
-import 'models.dart';
+import '../models.dart';
 
 /// AI 服务错误
 class AIError implements Exception {
