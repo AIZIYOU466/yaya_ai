@@ -19,6 +19,18 @@ android {
         targetSdkVersion 34
         versionCode 1
         versionName "1.0.0"
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17"
+                arguments "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+        }
     }
 
     buildTypes {

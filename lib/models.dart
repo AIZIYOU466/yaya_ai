@@ -79,6 +79,64 @@ class ChatMessage extends Equatable {
   String toString() => 'ChatMessage(role: $role)';
 }
 
+/// 屏幕节点
+class ScreenNode extends Equatable {
+  final String id;
+  final String text;
+  final String className;
+  final String bounds;
+  final List<ScreenNode> children;
+
+  const ScreenNode({
+    required this.id,
+    this.text = '',
+    this.className = '',
+    this.bounds = '',
+    this.children = const [],
+  });
+
+  factory ScreenNode.fromJson(Map<String, dynamic> json) {
+    final children = (json['children'] as List<dynamic>?)
+        ?.map((c) => ScreenNode.fromJson(c as Map<String, dynamic>))
+        .toList() ??
+        [];
+    return ScreenNode(
+      id: json['id'] as String? ?? '',
+      text: json['text'] as String? ?? '',
+      className: json['className'] as String? ?? '',
+      bounds: json['bounds'] as String? ?? '',
+      children: children,
+    );
+  }
+
+  @override
+  List<Object?> get props => [id, text, className, bounds, children];
+}
+
+/// 操作请求
+class ActionRequest extends Equatable {
+  final String type; // 'click', 'input', 'scroll'
+  final String? nodeId;
+  final String? text;
+
+  const ActionRequest({
+    required this.type,
+    this.nodeId,
+    this.text,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'type': type,
+      if (nodeId != null) 'nodeId': nodeId,
+      if (text != null) 'text': text,
+    };
+  }
+
+  @override
+  List<Object?> get props => [type, nodeId, text];
+}
+
 /// 工具执行结果
 class ToolResult extends Equatable {
   final String type; // 'text', 'image', 'file', etc.
