@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers.dart';
 import '../widgets/glass_card.dart';
-import '../widgets/masked_input.dart';
 
 class ConfigScreen extends ConsumerStatefulWidget {
   const ConfigScreen({super.key});

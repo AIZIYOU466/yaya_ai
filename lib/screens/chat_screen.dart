@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../models.dart';
 import '../providers.dart';
 import '../services/ai_service.dart';
 import '../widgets/glass_card.dart';
@@ -22,9 +24,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   @override
   void initState() {
     super.initState();
-    // 请求权限
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      requestPermissions();
+      _requestPermissions();
     });
   }
 
@@ -33,6 +34,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  Future<void> _requestPermissions() async {
+    await Permission.storage.request();
+    await Permission.foregroundService.request();
   }
 
   Future<void> _sendMessage() async {
@@ -51,7 +57,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       final config = await ref.read(aiConfigProvider.future);
       final aiService = AIService();
 
-      final response = await aiService.streamChat(
+      final subscription = aiService.streamChat(
         _messages,
         model: config.config?.modelName,
         baseUrl: config.config?.baseUrl,
@@ -70,15 +76,19 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         _scrollToBottom();
       });
 
-      await response.asFuture();
+      await subscription.asFuture();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('发送失败: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('发送失败: $e')),
+        );
+      }
     } finally {
-      setState(() {
-        _isSending = false;
-      });
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+        });
+      }
     }
   }
 
@@ -102,15 +112,15 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.settings),
-            onPressed: () => Navigator.pushNamed(context, '/config'),
+            onPressed: () => context.push('/config'),
           ),
           IconButton(
             icon: const Icon(Icons.terminal),
-            onPressed: () => Navigator.pushNamed(context, '/terminal'),
+            onPressed: () => context.push('/terminal'),
           ),
           IconButton(
             icon: const Icon(Icons.extension),
-            onPressed: () => Navigator.pushNamed(context, '/mcp'),
+            onPressed: () => context.push('/mcp'),
           ),
         ],
       ),

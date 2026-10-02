@@ -36,7 +36,7 @@ class TerminalContainerState {
 class TerminalManager {
   Process? _process;
   String _workingDir = '';
-  final String _debianRootfsDir = 'debian_rootfs';
+  String _debianRootfsDir = 'debian_rootfs';
 
   TerminalContainerState _state = TerminalContainerState();
   final _stateController = StreamController<TerminalContainerState>.broadcast();
@@ -50,7 +50,7 @@ class TerminalManager {
   Future<void> init() async {
     final appDir = await getApplicationDocumentsDirectory();
     _workingDir = appDir.path;
-    _debianRootfsDir = '$_workingDir/$debianRootfsDir';
+    _debianRootfsDir = '$_workingDir/$_debianRootfsDir';
   }
 
   /// 启动容器

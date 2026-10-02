@@ -90,7 +90,7 @@ class ToolResult extends Equatable {
   });
 
   @override
-  List<Object> get props => [type, data];
+  List<Object?> get props => [type, data];
 
   @override
   String toString() => 'ToolResult(type: $type)';

@@ -1,7 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../providers.dart';
 import '../services/terminal_manager.dart';
 import '../widgets/glass_card.dart';
 
@@ -53,9 +54,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
 
   Future<void> _startContainer() async {
     final success = await _terminalManager.startContainer();
-    if (!success) {
+    if (!success && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('启动容器失败: ${_terminalManager.state.error}')),
+        SnackBar(content: Text('启动容器失败: ${_terminalManager.state.error ?? "未知错误"}')),
       );
     }
   }
@@ -74,7 +75,7 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final terminalState = ref.watch(terminalStateProvider);
+    final state = _terminalManager.state;
 
     return Scaffold(
       appBar: AppBar(
@@ -82,12 +83,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         actions: [
           IconButton(
             icon: Icon(
-              terminalState.value?.isRunning == true
-                  ? Icons.stop
-                  : Icons.play_arrow,
+              state.isRunning ? Icons.stop : Icons.play_arrow,
             ),
             onPressed: () {
-              if (terminalState.value?.isRunning == true) {
+              if (state.isRunning) {
                 _stopContainer();
               } else {
                 _startContainer();
@@ -104,9 +103,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
               padding: const EdgeInsets.all(8),
               child: ListView.builder(
                 controller: _scrollController,
-                itemCount: terminalState.value?.history.length ?? 0,
+                itemCount: state.history.length,
                 itemBuilder: (context, index) {
-                  final line = terminalState.value!.history[index];
+                  final line = state.history[index];
                   return Text(
                     line,
                     style: const TextStyle(

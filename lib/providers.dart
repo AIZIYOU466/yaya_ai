@@ -39,28 +39,36 @@ class AIConfigState extends Equatable {
 class TerminalState extends Equatable {
   final bool isRunning;
   final String? shellPrompt;
+  final String? error;
   final List<String> recentCommands;
+  final List<String> history;
 
   const TerminalState({
     this.isRunning = false,
     this.shellPrompt,
+    this.error,
     this.recentCommands = const [],
+    this.history = const [],
   });
 
   TerminalState copyWith({
     bool? isRunning,
     String? shellPrompt,
+    String? error,
     List<String>? recentCommands,
+    List<String>? history,
   }) {
     return TerminalState(
       isRunning: isRunning ?? this.isRunning,
       shellPrompt: shellPrompt ?? this.shellPrompt,
+      error: error ?? this.error,
       recentCommands: recentCommands ?? this.recentCommands,
+      history: history ?? this.history,
     );
   }
 
   @override
-  List<Object?> get props => [isRunning, shellPrompt, recentCommands];
+  List<Object?> get props => [isRunning, shellPrompt, error, recentCommands, history];
 
   @override
   String toString() => 'TerminalState(isRunning: $isRunning)';
@@ -291,27 +299,35 @@ class MCPServerInfo extends Equatable {
   final String name;
   final String type; // 'stdio' or 'http'
   final bool enabled;
+  final String? url;
+  final String? command;
 
   const MCPServerInfo({
     required this.name,
     required this.type,
     required this.enabled,
+    this.url,
+    this.command,
   });
 
   MCPServerInfo copyWith({
     String? name,
     String? type,
     bool? enabled,
+    String? url,
+    String? command,
   }) {
     return MCPServerInfo(
       name: name ?? this.name,
       type: type ?? this.type,
       enabled: enabled ?? this.enabled,
+      url: url ?? this.url,
+      command: command ?? this.command,
     );
   }
 
   @override
-  List<Object> get props => [name, type, enabled];
+  List<Object?> get props => [name, type, enabled, url, command];
 
   @override
   String toString() => 'MCPServerInfo(name: $name)';
