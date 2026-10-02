@@ -1,0 +1,26 @@
+include ':app'
+
+def flutterProjectRoot = rootProject.projectDir.parentFile.toPath()
+def plugins = new File(flutterProjectRoot.toFile(), '.flutter-plugins-dependencies')
+
+if (plugins.exists()) {
+    def properties = new Properties()
+    plugins.withInputStream { properties.load(it) }
+
+    properties.each { name, path ->
+        def pluginProject = new Project(
+            name: name,
+            projectDir: new File(path),
+            buildFileName: 'build.gradle',
+        )
+        include ":$name"
+        project(":$name").projectDir = pluginProject.projectDir
+        project(":$name").buildFileName = pluginProject.buildFileName
+    }
+}
+
+gradle.projectsEvaluated {
+    tasks.withType(JavaCompile) {
+        options.compilerArgs << "-Xlint:unchecked" << "-Xlint:deprecation"
+    }
+}
