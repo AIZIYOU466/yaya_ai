@@ -156,7 +156,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                   onTap: _isSending ? null : _sendMessage,
                   child: Icon(
                     _isSending ? Icons.hourglass_empty : Icons.send,
-                    color: Colors.white,
+                    color: Theme.of(context).colorScheme.onSurface,
                   ),
                 ),
               ],

@@ -58,15 +58,41 @@ class AIService {
         ),
       );
 
-      final stream = response.data as Stream<List<int>>;
-      await for (final chunk in stream) {
-        final data = utf8.decode(chunk);
-        yield data;
+      // dio 5.x：stream 响应类型下 data 是 ResponseBody（不是 Stream<List<int>>）
+      final responseBody = response.data as ResponseBody;
+      var pending = '';
+      await for (final chunk in responseBody.stream) {
+        pending += utf8.decode(chunk, allowMalformed: true);
+        final lines = pending.split('\n');
+        pending = lines.removeLast(); // 保留可能跨 chunk 截断的半行
+        for (final line in lines) {
+          final token = _parseSseLine(line);
+          if (token != null) yield token;
+        }
       }
+      final last = _parseSseLine(pending);
+      if (last != null) yield last;
     } on DioException catch (e) {
       throw AIError('HTTP ${e.response?.statusCode}: ${e.message}', code: e.response?.statusCode);
     } catch (e) {
       throw AIError('Request failed: $e');
+    }
+  }
+
+  /// 解析一行 SSE 数据，返回 delta.content 文本；非 data 行/无法解析返回 null
+  String? _parseSseLine(String line) {
+    final trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) return null;
+    final payload = trimmed.substring(5).trim();
+    if (payload.isEmpty || payload == '[DONE]') return null;
+    try {
+      final json = jsonDecode(payload) as Map<String, dynamic>;
+      final choices = json['choices'] as List<dynamic>?;
+      if (choices == null || choices.isEmpty) return null;
+      final delta = choices[0]['delta'] as Map<String, dynamic>?;
+      return delta?['content'] as String?;
+    } catch (_) {
+      return null; // keep-alive 等无法解析的行
     }
   }
 

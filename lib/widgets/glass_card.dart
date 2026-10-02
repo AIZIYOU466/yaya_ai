@@ -1,5 +1,3 @@
-import 'dart:ui' show ImageFilter;
-
 import 'package:flutter/material.dart';
 
 /// 毛玻璃卡片
@@ -25,6 +23,7 @@ class GlassCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     return Container(
       margin: margin,
       child: Material(
@@ -36,7 +35,8 @@ class GlassCard extends StatelessWidget {
             padding: padding,
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(borderRadius!),
-              color: backgroundColor ?? Colors.white.withOpacity(0.1),
+              color: backgroundColor ?? colors.surfaceContainerHighest,
+              border: Border.all(color: colors.outlineVariant, width: 1),
               boxShadow: [
                 BoxShadow(
                   color: Colors.black.withOpacity(0.1),
@@ -45,20 +45,7 @@ class GlassCard extends StatelessWidget {
                 ),
               ],
             ),
-            child: BackdropFilter(
-              filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-              child: Container(
-                padding: padding,
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(borderRadius!),
-                  border: Border.all(
-                    color: Colors.white.withOpacity(0.2),
-                    width: 1.5,
-                  ),
-                ),
-                child: child,
-              ),
-            ),
+            child: child,
           ),
         ),
       ),
@@ -156,24 +143,22 @@ class _MaskedInputState extends State<MaskedInput> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.1),
+        color: colors.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: Colors.white.withOpacity(0.2),
-          width: 1,
-        ),
+        border: Border.all(color: colors.outlineVariant, width: 1),
       ),
       child: TextField(
         controller: widget.controller,
         keyboardType: widget.keyboardType,
         obscureText: _obscureText,
         onSubmitted: (value) => widget.onSubmitted?.call(),
-        style: const TextStyle(color: Colors.white),
+        style: TextStyle(color: colors.onSurface),
         decoration: InputDecoration(
           hintText: widget.hintText,
-          hintStyle: TextStyle(color: Colors.white.withOpacity(0.5)),
+          hintStyle: TextStyle(color: colors.onSurfaceVariant),
           border: InputBorder.none,
           contentPadding: const EdgeInsets.symmetric(
             horizontal: 16,
@@ -183,7 +168,7 @@ class _MaskedInputState extends State<MaskedInput> {
               ? IconButton(
                   icon: Icon(
                     _obscureText ? Icons.visibility : Icons.visibility_off,
-                    color: Colors.white.withOpacity(0.7),
+                    color: colors.onSurfaceVariant,
                   ),
                   onPressed: () {
                     setState(() {
