@@ -41,6 +41,8 @@ android {
 
     buildTypes {
         release {
+            // 临时使用 debug 签名，保证 CI 产物可直接侧载安装（正式发布再换正式 keystore）
+            signingConfig = signingConfigs.debug
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
