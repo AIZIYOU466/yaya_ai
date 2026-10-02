@@ -55,11 +55,12 @@ class ModelStreamHandler(private val context: Context) : EventChannel.StreamHand
             try {
                 when (backend) {
                     "desktop" -> {
-                        val err = DesktopInferenceClient.generate(
-                            ModelRouter.desktopEndpoint(context),
-                            prompt
-                        ) { token -> out.success(token) }
-                        if (err == null) out.endOfStream() else out.error("DESKTOP_ERROR", err)
+                        // 桌面 gRPC 客户端依赖 proto 生成物（com.yaya.agent.proto / com.yaya.ai.proto），
+                        // 生成物经 proto.yml 进仓库后再接入 DesktopInferenceClient（AGENTS R5/R9）。
+                        out.error(
+                            "DESKTOP_ERROR",
+                            "桌面推理未可用：gRPC 客户端未就绪（proto 生成物待 proto.yml 产出）"
+                        )
                     }
 
                     else -> {
