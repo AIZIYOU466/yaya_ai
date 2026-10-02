@@ -1,0 +1,7 @@
+[package]
+name = "yaya-core"
+version = "0.1.0"
+edition = "2021"
+description = "YAYai Agent Core：任务状态机 + 模型路由策略（唯一规范源，见 AGENTS.md R6）"
+
+[dependencies]

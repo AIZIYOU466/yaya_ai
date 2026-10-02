@@ -6,43 +6,76 @@ import java.io.File
 import java.io.InputStreamReader
 
 object ProotManager {
+    const val EXIT_MARKER = "<YAYA_EXIT_"
+
     private var process: Process? = null
-    private var rootfsDir: String = ""
+    @Volatile
+    private var readerThread: Thread? = null
+    @Volatile
+    private var lineListener: ((String) -> Unit)? = null
 
     fun start(context: Context): Boolean {
-        rootfsDir = context.filesDir.absolutePath + "/debian_rootfs"
-        val rootfs = File(rootfsDir)
+        if (process?.isAlive == true) return true
+        val rootfs = File(context.filesDir.absolutePath + "/debian_rootfs")
         if (!rootfs.exists()) return false
 
         val cmd = arrayOf(
             "proot",
-            "--rootfs=$rootfsDir",
+            "--rootfs=${rootfs.absolutePath}",
             "--bind=/dev", "--bind=/proc", "--bind=/sys",
             "--bind=/storage/emulated/0:/sdcard",
             "/bin/bash", "-l"
         )
         process = ProcessBuilder(*cmd).redirectErrorStream(true).start()
-        return process != null
+        pumpOutput()
+        return true
     }
 
-    fun executeCommand(command: String, onOutput: (String) -> Unit) {
+    private fun pumpOutput() {
         val p = process ?: return
-        p.outputStream.write("$command\n".toByteArray())
-        p.outputStream.flush()
-        val reader = BufferedReader(InputStreamReader(p.inputStream))
-        var line = reader.readLine()
-        while (line != null) {
-            onOutput(line)
-            line = reader.readLine()
+        readerThread = Thread {
+            val reader = BufferedReader(InputStreamReader(p.inputStream))
+            try {
+                while (!Thread.currentThread().isInterrupted) {
+                    val line = reader.readLine() ?: break
+                    lineListener?.invoke(line)
+                }
+            } catch (_: Exception) {
+            } finally {
+                lineListener?.invoke("${EXIT_MARKER}EXITED>")
+            }
+        }.apply {
+            isDaemon = true
+            name = "proot-pump"
+            start()
         }
     }
 
+    fun setLineListener(listener: ((String) -> Unit)?) {
+        lineListener = listener
+    }
+
+    fun executeCommand(command: String) {
+        val p = process ?: return
+        // 哨兵行通知 ModelStreamHandler 结束本次输出流（不销毁容器进程）
+        val payload = "$command; printf '\\n$EXIT_MARKER%s>\\n' \"\$?\"\n"
+        p.outputStream.write(payload.toByteArray())
+        p.outputStream.flush()
+    }
+
     fun stopCommand() {
-        process?.destroy()
-        process = null
+        val p = process ?: return
+        try {
+            p.outputStream.write(3)
+            p.outputStream.flush()
+        } catch (_: Exception) {
+        }
     }
 
     fun stop() {
+        lineListener = null
+        readerThread?.interrupt()
+        readerThread = null
         process?.destroy()
         process = null
     }

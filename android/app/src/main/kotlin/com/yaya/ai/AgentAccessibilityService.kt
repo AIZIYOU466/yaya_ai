@@ -1,5 +1,6 @@
 package com.yaya.ai
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent

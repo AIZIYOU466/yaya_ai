@@ -1,0 +1,21 @@
+# This file tracks properties of this Flutter project.
+# Used by Flutter tool to assess capabilities and perform upgrades etc.
+#
+# This file should be version controlled and should not be manually edited.
+
+version:
+  revision: "a14f74ff3a1cbd521d0e0ecccffcc98f9115f94e"
+  channel: stable
+
+project_type: app
+
+# Tracks migration to the v2 embedding
+migration:
+  platforms:
+    - platform: root
+      create_revision: "a14f74ff3a1cbd521d0e0ecccffcc98f9115f94e"
+      base_revision: "a14f74ff3a1cbd521d0e0ecccffcc98f9115f94e"
+
+  unmanaged_files:
+    - 'lib/main.dart'
+    - 'ios/Runner.xcodeproj/project.pbxproj'

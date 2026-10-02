@@ -1,49 +1,85 @@
 package com.yaya.ai
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import io.flutter.plugin.common.EventChannel
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
 
 class ModelStreamHandler(private val context: Context) : EventChannel.StreamHandler {
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var worker: Thread? = null
 
-    private var thread: Thread? = null
+    private inner class MainThreadSink(private val delegate: EventChannel.EventSink) {
+        fun success(value: Any?) {
+            mainHandler.post { delegate.success(value) }
+        }
+
+        fun error(code: String, message: String?) {
+            mainHandler.post { delegate.error(code, message, null) }
+        }
+
+        fun endOfStream() {
+            mainHandler.post { delegate.endOfStream() }
+        }
+    }
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
-        val args = JSONObject(arguments as String)
-        val prompt = args.optString("prompt", "")
-        val modelPath = args.optString("modelPath", null)
-        val command = args.optString("command", null)
+        val out = MainThreadSink(events)
+        val raw = arguments as? String ?: ""
+        val args = try {
+            JSONObject(raw)
+        } catch (_: Exception) {
+            JSONObject()
+        }
 
-        thread = Thread {
+        val command = args.optString("command", "")
+        if (command.isNotEmpty()) {
+            ProotManager.setLineListener { line ->
+                if (line.startsWith(ProotManager.EXIT_MARKER)) {
+                    ProotManager.setLineListener(null)
+                    out.endOfStream()
+                } else {
+                    out.success(line)
+                }
+            }
+            ProotManager.executeCommand(command)
+            return
+        }
+
+        val prompt = args.optString("prompt", "")
+        val modelPath = if (args.has("modelPath")) args.optString("modelPath", "") else null
+        val backend = args.optString("backend", "jni")
+
+        worker = Thread {
             try {
-                if (command != null) {
-                    ProotManager.executeCommand(command) { line ->
-                        events.success(line)
+                when (backend) {
+                    "desktop" -> {
+                        val err = DesktopInferenceClient.generate(
+                            ModelRouter.desktopEndpoint(context),
+                            prompt
+                        ) { token -> out.success(token) }
+                        if (err == null) out.endOfStream() else out.error("DESKTOP_ERROR", err)
                     }
-                } else if (prompt.isNotEmpty()) {
-                    // 模型推理：通过 JNI 调用 llama.cpp
-                    // 如果 JNI 不可用，返回提示
-                    try {
-                        ModelBridge.generate(modelPath, prompt) { token ->
-                            events.success(token)
+
+                    else -> {
+                        val err = ModelBridge.generate(modelPath, prompt) { token ->
+                            out.success(token)
                         }
-                    } catch (e: UnsatisfiedLinkError) {
-                        events.success("[JNI llama.cpp 未加载，请编译 native 库]")
+                        if (err == null) out.endOfStream() else out.error("MODEL_ERROR", err)
                     }
                 }
             } catch (e: Exception) {
-                events.error("STREAM_ERROR", e.message, null)
+                out.error("STREAM_ERROR", e.message ?: e.toString())
             }
-        }
-        thread?.start()
+        }.apply { start() }
     }
 
     override fun onCancel(arguments: Any?) {
         ModelBridge.cancel()
         ProotManager.stopCommand()
-        thread?.interrupt()
-        thread = null
+        ProotManager.setLineListener(null)
+        worker?.interrupt()
+        worker = null
     }
 }
