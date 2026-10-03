@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../models.dart';
 import '../providers.dart';
 import '../widgets/glass_card.dart';
 
@@ -13,8 +12,6 @@ class MCPScreen extends ConsumerStatefulWidget {
 }
 
 class _MCPScreenState extends ConsumerState<MCPScreen> {
-  bool _isLoading = false;
-
   @override
   void initState() {
     super.initState();
@@ -24,10 +21,6 @@ class _MCPScreenState extends ConsumerState<MCPScreen> {
   }
 
   Future<void> _loadServers() async {
-    setState(() {
-      _isLoading = true;
-    });
-
     try {
       await ref.read(mcpServersProvider.notifier).loadServers();
     } catch (e) {
@@ -35,12 +28,6 @@ class _MCPScreenState extends ConsumerState<MCPScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('加载失败: $e')),
       );
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
     }
   }
 

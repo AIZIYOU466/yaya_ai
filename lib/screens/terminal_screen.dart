@@ -18,7 +18,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   final ScrollController _scrollController = ScrollController();
   final List<String> _output = [];
   bool _isRunning = false;
-  bool _rootfsReady = false;
   bool _installing = false;
   List<Map<String, dynamic>> _profiles = [];
   String _currentId = 'alpine';
@@ -49,7 +48,6 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       _currentId = current;
       _selectedId = _selectedId;
       _profiles = profiles;
-      _rootfsReady = _isInstalled(current);
     });
   }
 
