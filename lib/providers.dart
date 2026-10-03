@@ -187,19 +187,46 @@ class MCPServersNotifier extends AsyncNotifier<MCPServersState> {
     final current = state.value;
     if (current == null) return;
 
-    final updatedServers = current.servers
-        .map((server) => server.name == name
-            ? server.copyWith(enabled: !server.enabled)
-            : server)
-        .toList();
+    await _persist([
+      for (final s in current.servers)
+        if (s.name == name) s.copyWith(enabled: !s.enabled) else s,
+    ]);
+  }
 
+  Future<void> addServer(MCPServerInfo server) async {
+    final current = state.value;
+    if (current == null) return;
+    if (current.servers.any((s) => s.name == server.name)) return;
+    await _persist([...current.servers, server]);
+  }
+
+  Future<void> updateServer(MCPServerInfo server) async {
+    final current = state.value;
+    if (current == null) return;
+    await _persist([
+      for (final s in current.servers) s.name == server.name ? server : s,
+    ]);
+  }
+
+  Future<void> removeServer(String name) async {
+    final current = state.value;
+    if (current == null) return;
+    await _persist([
+      for (final s in current.servers) if (s.name != name) s,
+    ]);
+  }
+
+  /// 持久化到 SharedPreferences 并同步 state。
+  Future<void> _persist(List<MCPServerInfo> servers) async {
+    final current = state.value;
+    if (current == null) return;
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(
         _prefsKey,
-        jsonEncode(updatedServers.map((s) => s.toJson()).toList()),
+        jsonEncode(servers.map((s) => s.toJson()).toList()),
       );
-      state = AsyncValue.data(current.copyWith(servers: updatedServers));
+      state = AsyncValue.data(current.copyWith(servers: servers));
     } catch (e) {
       state = AsyncValue.error(
         MCPServersState(error: '保存 MCP 配置失败: $e'),

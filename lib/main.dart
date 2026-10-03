@@ -3,10 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import 'providers.dart';
+import 'screens/home_screen.dart';
 import 'screens/chat_screen.dart';
-import 'screens/config_screen.dart';
-import 'screens/mcp_screen.dart';
-import 'screens/terminal_screen.dart';
 
 void main() {
   runApp(
@@ -47,24 +45,16 @@ class MyApp extends StatelessWidget {
   }
 }
 
-// 路由配置
+// 路由配置：主壳进 HomeScreen（底部导航），保留旧独立路由兼容直接跳转。
 final GoRouter _router = GoRouter(
   routes: [
     GoRoute(
       path: '/',
+      builder: (context, state) => const HomeScreen(),
+    ),
+    GoRoute(
+      path: '/chat',
       builder: (context, state) => const ChatScreen(),
-    ),
-    GoRoute(
-      path: '/config',
-      builder: (context, state) => const ConfigScreen(),
-    ),
-    GoRoute(
-      path: '/terminal',
-      builder: (context, state) => const TerminalScreen(),
-    ),
-    GoRoute(
-      path: '/mcp',
-      builder: (context, state) => const MCPScreen(),
     ),
   ],
 );

@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 
 import '../platform/agent_channel.dart';
 import '../providers.dart';
@@ -37,12 +37,35 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   bool _running = false;
   String _status = '';
 
+  // 流式 token 节流：合并到 StringBuffer，定时 flush，降低 Markdown 重建频率。
+  static const _flushInterval = Duration(milliseconds: 40);
+  final StringBuffer _pendingTokens = StringBuffer();
+  Timer? _tokenTimer;
+
   @override
   void dispose() {
+    _tokenTimer?.cancel();
+    _pendingTokens.clear();
     _eventSub?.cancel();
     _messageController.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _onToken(String text) {
+    if (text.isEmpty) return;
+    _pendingTokens.write(text);
+    _tokenTimer ??= Timer(_flushInterval, _flushTokens);
+  }
+
+  void _flushTokens() {
+    _tokenTimer?.cancel();
+    _tokenTimer = null;
+    if (_pendingTokens.isEmpty) return;
+    final chunk = _pendingTokens.toString();
+    _pendingTokens.clear();
+    if (!mounted) return;
+    setState(() => _appendAssistant(chunk));
   }
 
   Future<void> _send() async {
@@ -107,7 +130,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
 
     switch (event['type']) {
       case 'token':
-        setState(() => _appendAssistant(event['text'] as String? ?? ''));
+        _onToken(event['text'] as String? ?? '');
       case 'tool_call':
         setState(() => _items.add(_Item(
               role: 'tool',
@@ -124,11 +147,13 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       case 'state':
         setState(() => _status = event['state'] as String? ?? '');
       case 'done':
+        _flushTokens();
         setState(() {
           _status = 'done';
           _running = false;
         });
       case 'error':
+        _flushTokens();
         setState(() => _running = false);
         _appendSystem('错误: ${event['message']}');
     }
@@ -161,11 +186,8 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-        );
+        // 流式高频滚动直接用 jumpTo，避免动画堆积。
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
       }
     });
   }
@@ -175,20 +197,6 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(_running ? 'YAYai · $_status' : 'YAYai'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.settings),
-            onPressed: () => context.push('/config'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.terminal),
-            onPressed: () => context.push('/terminal'),
-          ),
-          IconButton(
-            icon: const Icon(Icons.extension),
-            onPressed: () => context.push('/mcp'),
-          ),
-        ],
       ),
       body: Column(
         children: [
@@ -208,7 +216,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
                 Expanded(
                   child: MaskedInput(
                     controller: _messageController,
-                    hintText: '输入任务，例如「打开设置把字体调大」...',
+                    hintText: '输入指令，如「运行测试」「查看项目结构」「写一段代码」',
                     onSubmitted: _send,
                   ),
                 ),
@@ -224,6 +232,48 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  MarkdownStyleSheet _mdStyle(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+      codeblockDecoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      codeStyle: const TextStyle(
+        fontFamily: 'monospace',
+        fontSize: 13,
+      ),
+      blockSpacing: 8,
+      blockquoteDecoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
+        borderRadius: BorderRadius.circular(4),
+      ),
+    );
+  }
+
+  Widget _buildAssistantBubble(_Item item) {
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          constraints: const BoxConstraints(maxWidth: 560),
+          decoration: BoxDecoration(
+            color: colors.surfaceContainerHigh.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: MarkdownBody(
+            data: item.text,
+            selectable: true,
+            styleSheet: _mdStyle(context),
+          ),
+        ),
       ),
     );
   }
@@ -263,6 +313,9 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
         ),
       );
     }
-    return ChatBubble(message: item.text, isUser: item.isUser);
+    if (item.isUser) {
+      return ChatBubble(message: item.text, isUser: true);
+    }
+    return _buildAssistantBubble(item);
   }
 }

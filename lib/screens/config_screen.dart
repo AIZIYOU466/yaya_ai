@@ -118,6 +118,33 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     }
   }
 
+  static const _providers = <String, ({String baseUrl, String model})>{
+    'OpenAI': (baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini'),
+    'DeepSeek': (baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat'),
+    'OpenRouter': (
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'openai/gpt-4o-mini'
+    ),
+    'Moonshot': (baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k'),
+    '硅基流动': (
+      baseUrl: 'https://api.siliconflow.cn/v1',
+      model: 'Qwen/Qwen2.5-7B-Instruct'
+    ),
+    '智谱': (baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash'),
+  };
+
+  void _applyPreset(String name) {
+    final p = _providers[name];
+    if (p == null) return;
+    setState(() {
+      _baseUrlController.text = p.baseUrl;
+      _modelNameController.text = p.model;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已填入 $name 预设，请补充 API Key')),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -140,6 +167,23 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
                     ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    '预设供应商（点击填入）',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      for (final e in _providers.entries)
+                        ActionChip(
+                          label: Text(e.key),
+                          onPressed: () => _applyPreset(e.key),
+                        ),
+                    ],
                   ),
                   const SizedBox(height: 16),
                   MaskedInput(
