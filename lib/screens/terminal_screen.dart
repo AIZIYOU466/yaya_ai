@@ -20,13 +20,16 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   bool _isRunning = false;
   bool _rootfsReady = false;
   bool _installing = false;
+  List<Map<String, dynamic>> _profiles = [];
+  String _currentId = 'alpine';
+  String _selectedId = 'alpine';
   StreamSubscription<String>? _commandSubscription;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _checkRootfs();
+      _loadProfiles();
     });
   }
 
@@ -38,19 +41,136 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     super.dispose();
   }
 
-  Future<void> _checkRootfs() async {
-    final ok = await AgentChannel.rootfsInstalled();
+  Future<void> _loadProfiles() async {
+    final current = await AgentChannel.currentRootfs();
+    final profiles = await AgentChannel.rootfsProfiles();
     if (!mounted) return;
-    setState(() => _rootfsReady = ok);
+    setState(() {
+      _currentId = current;
+      _selectedId = _selectedId;
+      _profiles = profiles;
+      _rootfsReady = _isInstalled(current);
+    });
+  }
+
+  bool _isInstalled(String id) {
+    for (final p in _profiles) {
+      if (p['id'] == id) return p['installed'] as bool? ?? false;
+    }
+    return false;
+  }
+
+  bool get _selectedInstalled => _isInstalled(_selectedId);
+
+  String _profileLabel(Map<String, dynamic> p) {
+    final id = p['id'];
+    final installed = p['installed'] as bool? ?? false;
+    final isCurrent = id == _currentId;
+    return '${p['name']}${isCurrent ? ' · 当前' : (installed ? ' · 已装' : ' · 未装')}';
   }
 
   Future<void> _installRootfs() async {
     setState(() => _installing = true);
-    final msg = await AgentChannel.installRootfs();
+    final msg = await AgentChannel.installRootfs(_selectedId);
     if (!mounted) return;
     setState(() => _installing = false);
-    await _checkRootfs();
+    await _loadProfiles();
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _useRootfs() async {
+    await AgentChannel.setCurrentRootfs(_selectedId);
+    if (!mounted) return;
+    await _loadProfiles();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已切换到：$_selectedId')),
+    );
+  }
+
+  Future<void> _resetRootfs() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('重置镜像'),
+        content: Text('删除「$_selectedId」的 rootfs 并清空数据，确认吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('重置'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final msg = await AgentChannel.resetRootfs(_selectedId);
+    if (!mounted) return;
+    await _loadProfiles();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _addCustomRootfs() async {
+    final nameCtrl = TextEditingController();
+    final urlCtrl = TextEditingController();
+    final shaCtrl = TextEditingController();
+    final result = await showDialog<({String name, String url, String sha})>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('添加自定义镜像'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(labelText: '名称'),
+              ),
+              TextField(
+                controller: urlCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'rootfs 下载 URL（tar.gz）',
+                ),
+              ),
+              TextField(
+                controller: shaCtrl,
+                decoration: const InputDecoration(labelText: 'SHA256（可选）'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(
+              dialogContext,
+              (
+                name: nameCtrl.text.trim(),
+                url: urlCtrl.text.trim(),
+                sha: shaCtrl.text.trim(),
+              ),
+            ),
+            child: const Text('添加'),
+          ),
+        ],
+      ),
+    );
+    if (result == null || result.name.isEmpty || result.url.isEmpty) return;
+    final id = await AgentChannel.addRootfsProfile(
+      name: result.name,
+      url: result.url,
+      sha256: result.sha,
+    );
+    if (!mounted) return;
+    await _loadProfiles();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('已添加：$id')),
+    );
   }
 
   void _scrollToBottom() {
@@ -77,11 +197,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('启动失败：${err ?? '未知原因'}')),
         );
-        _checkRootfs();
+        _loadProfiles();
       }
     }
   }
-
   Future<void> _stopContainer() async {
     await AgentChannel.stopContainer();
     if (mounted) {
@@ -144,32 +263,90 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       ),
       body: Column(
         children: [
-          if (!_rootfsReady)
-            Container(
-              color: Theme.of(context)
-                  .colorScheme
-                  .surfaceContainerHighest
-                  .withOpacity(0.3),
-              padding: const EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  const Icon(Icons.info_outline),
-                  const SizedBox(width: 8),
-                  Expanded(
+          // 镜像管理条
+          Container(
+            color: Theme.of(context)
+                .colorScheme
+                .surfaceContainerHighest
+                .withOpacity(0.3),
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.dns_outlined, size: 16),
+                    const SizedBox(width: 6),
+                    const Text(
+                      'Linux 环境（镜像）',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                    ),
+                    const Spacer(),
+                    if (!_installing)
+                      IconButton(
+                        icon: const Icon(Icons.add_box_outlined),
+                        tooltip: '自定义镜像',
+                        onPressed: _addCustomRootfs,
+                      ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButton<String>(
+                        value: _selectedId,
+                        isExpanded: true,
+                        items: [
+                          for (final p in _profiles)
+                            DropdownMenuItem(
+                              value: p['id'] as String,
+                              child: Text(
+                                _profileLabel(p),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                        ],
+                        onChanged: _installing
+                            ? null
+                            : (v) {
+                                if (v != null) {
+                                  setState(() => _selectedId = v);
+                                }
+                              },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (_installing)
+                      const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    else
+                      FilledButton(
+                        onPressed: _selectedInstalled ? _useRootfs : _installRootfs,
+                        child: Text(_selectedInstalled ? '使用' : '安装'),
+                      ),
+                    const SizedBox(width: 4),
+                    IconButton(
+                      icon: const Icon(Icons.refresh),
+                      tooltip: '重置镜像',
+                      onPressed:
+                          _selectedInstalled && !_installing ? _resetRootfs : null,
+                    ),
+                  ],
+                ),
+                if (_installing)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
                     child: Text(
-                      _installing
-                          ? '正在下载并安装 Alpine Linux 环境（约 4MB）...'
-                          : '未安装 Linux 环境，终端不可用。',
+                      '正在下载并安装「$_selectedId」...',
+                      style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ),
-                  if (!_installing)
-                    FilledButton(
-                      onPressed: _installRootfs,
-                      child: const Text('安装'),
-                    ),
-                ],
-              ),
+              ],
             ),
+          ),
           Expanded(
             child: Container(
               color: Colors.black87,

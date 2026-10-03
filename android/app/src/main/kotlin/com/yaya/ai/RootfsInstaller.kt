@@ -9,49 +9,136 @@ import java.net.URL
 import java.security.MessageDigest
 import java.util.zip.GZIPInputStream
 
+/** 一个 rootfs 镜像配置（内置或用户自定义）。 */
+data class RootfsProfile(
+    val id: String,
+    val name: String,
+    val url: String,
+    val sha256: String,
+    val note: String = "",
+    val builtin: Boolean = true,
+)
+
 /**
- * 内置 Linux rootfs 安装器（对标 AiCode 的 ContainerInstaller）。
+ * 内置 Linux rootfs 安装器（对标 AiCode 的 ContainerInstaller / 镜像目录）。
  *
- * 来源：Alpine Linux 官方 minirootfs（aarch64），约 3.8MB，官方 SHA256 校验。
- * 下载 → 校验 → 解压（gzip 内置支持 + 自写 tar 解压，防路径穿越）→ 输出到 filesDir/alpine_rootfs。
+ * - 镜像目录：内置可信镜像（Alpine 官方）+ 用户自定义（URL + SHA256）。
+ * - 每个镜像一个目录 filesDir/rootfs_<id>，安装完成写 .installed 标记。
+ * - 下载 → SHA256 校验 → gzip tar 解压（防路径穿越）→ 版本标记。
  */
 object RootfsInstaller {
-    const val ROOTFS_DIR_NAME = "alpine_rootfs"
-    // 官方目录核实（2026-10-03）：dl-cdn.alpinelinux.org v3.21 aarch64
-    private const val ROOTFS_URL =
-        "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.8-aarch64.tar.gz"
-    private const val EXPECTED_SHA256 =
-        "f25a96d2846a4bc439093107c1b48a8b0c93dcb411e2cb9cfded6f790b2bc001"
+    private const val PREFS = "yaya_rootfs"
+    private const val KEY_CURRENT = "current"
+    private const val KEY_CUSTOM = "custom_profiles"
+    private const val MARKER = ".installed"
 
-    fun rootfsDir(context: Context): File = File(context.filesDir, ROOTFS_DIR_NAME)
+    private val BUILTIN = listOf(
+        RootfsProfile(
+            id = "alpine",
+            name = "Alpine Linux 3.21",
+            url = "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-3.21.8-aarch64.tar.gz",
+            sha256 = "f25a96d2846a4bc439093107c1b48a8b0c93dcb411e2cb9cfded6f790b2bc001",
+            note = "官方 minirootfs，约 4MB，最快",
+        ),
+    )
 
-    fun isInstalled(context: Context): Boolean =
-        File(rootfsDir(context), "etc/alpine-release").exists()
+    fun profiles(context: Context): List<RootfsProfile> = BUILTIN + customProfiles(context)
 
-    /** 阻塞式安装；返回结果文本，异常以文本形式返回（供后台线程调用）。 */
-    fun install(context: Context): String {
+    fun currentId(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_CURRENT, null) ?: BUILTIN.first().id
+    }
+
+    fun setCurrent(context: Context, id: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putString(KEY_CURRENT, id).apply()
+    }
+
+    fun rootfsDir(context: Context, id: String): File {
+        // 兼容旧版单镜像安装（alpine_rootfs）
+        if (id == "alpine") {
+            val current = File(context.filesDir, "rootfs_alpine")
+            if (!current.exists()) {
+                val legacy = File(context.filesDir, "alpine_rootfs")
+                if (legacy.exists() && File(legacy, "etc/alpine-release").exists()) return legacy
+            }
+        }
+        return File(context.filesDir, "rootfs_$id")
+    }
+
+    fun isInstalled(context: Context, id: String): Boolean =
+        File(rootfsDir(context, id), MARKER).exists()
+
+    fun isInstalledCurrent(context: Context): Boolean =
+        isInstalled(context, currentId(context))
+
+    /** 阻塞式安装指定镜像；返回结果文本（供后台线程调用）。 */
+    fun install(context: Context, id: String): String {
+        val profile = profiles(context).firstOrNull { it.id == id }
+            ?: return "镜像不存在: $id"
         return try {
-            val tmp = File(context.cacheDir, "rootfs.tar.gz")
-            download(ROOTFS_URL, tmp)
+            val tmp = File(context.cacheDir, "rootfs-$id.tar.gz")
+            download(profile.url, tmp)
 
             val actual = sha256(tmp)
-            if (actual != EXPECTED_SHA256) {
+            if (profile.sha256.isNotEmpty() && actual != profile.sha256) {
                 tmp.delete()
-                return "校验失败：期望 $EXPECTED_SHA256\n实际 $actual（请重试）"
+                return "校验失败：期望 ${profile.sha256}\n实际 $actual（请重试）"
             }
 
-            val dest = rootfsDir(context)
+            val dest = rootfsDir(context, id)
             if (dest.exists()) dest.deleteRecursively()
             dest.mkdirs()
             val failed = tmp.inputStream().use { extractTar(it, dest) }
             tmp.delete()
-            val base = "Linux 环境安装完成（Alpine ${if (isInstalled(context)) "已就绪" else "校验异常"}）"
+            File(dest, MARKER).writeText("ok")
+            val base = "镜像 ${profile.name} 安装完成"
             if (failed > 0) "$base（$failed 个条目被跳过）" else base
         } catch (e: Exception) {
             val trace = e.stackTrace.take(8).joinToString("\n") { "    at $it" }
             "安装失败：${e::class.java.simpleName}: ${e.message ?: e}\n$trace"
         }
     }
+
+    fun reset(context: Context, id: String): String {
+        val dir = rootfsDir(context, id)
+        if (dir.exists()) dir.deleteRecursively()
+        return "已重置 $id（下次启动容器前需重新安装）"
+    }
+
+    /** 添加自定义镜像（URL 需指向 tar.gz rootfs），返回新镜像 id。 */
+    fun addCustom(context: Context, name: String, url: String, sha256: String): String {
+        val n = name.trim()
+        val u = url.trim()
+        if (n.isEmpty() || u.isEmpty()) return "名称与 URL 不能为空"
+        val id = "custom_${System.currentTimeMillis()}"
+        val profile = RootfsProfile(id, n, u, sha256.trim(), note = "自定义", builtin = false)
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val list = customProfiles(context).toMutableList().apply { add(profile) }
+        prefs.edit().putString(KEY_CUSTOM, encode(list)).apply()
+        return id
+    }
+
+    fun removeCustom(context: Context, id: String): String {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val kept = customProfiles(context).filterNot { it.id == id }
+        prefs.edit().putString(KEY_CUSTOM, encode(kept)).apply()
+        return "已删除 $id"
+    }
+
+    private fun customProfiles(context: Context): List<RootfsProfile> {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_CUSTOM, "") ?: return emptyList()
+        if (raw.isBlank()) return emptyList()
+        return raw.lines().mapNotNull { line ->
+            val p = line.split("|")
+            if (p.size < 4) null
+            else RootfsProfile(p[0], p[1], p[2], p[3], note = "自定义", builtin = false)
+        }
+    }
+
+    private fun encode(list: List<RootfsProfile>): String =
+        list.joinToString("\n") { "${it.id}|${it.name}|${it.url}|${it.sha256}" }
 
     private fun download(url: String, target: File) {
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -158,7 +245,7 @@ object RootfsInstaller {
                         }
                     }
                 } catch (e: Exception) {
-                    // 单条目失败不中断安装；关键文件（etc/alpine-release 等）在则可继续使用
+                    // 单条目失败不中断安装；关键文件在则可继续使用
                     failed++
                 }
                 skipFully(gz, (512 - (size % 512)) % 512)

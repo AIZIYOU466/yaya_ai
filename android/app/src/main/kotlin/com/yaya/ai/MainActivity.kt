@@ -10,6 +10,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONArray
 import org.json.JSONObject
 
 class MainActivity : FlutterActivity() {
@@ -90,15 +91,53 @@ class MainActivity : FlutterActivity() {
                     }
                     "localAvailable" -> result.success(agentHost.localAvailable())
                     "networkAvailable" -> result.success(isNetworkAvailable())
-                    "rootfsInstalled" -> result.success(RootfsInstaller.isInstalled(this))
+                    "rootfsInstalled" -> result.success(RootfsInstaller.isInstalledCurrent(this))
+                    "rootfsProfiles" -> {
+                        val arr = JSONArray()
+                        for (p in RootfsInstaller.profiles(this)) {
+                            arr.put(
+                                JSONObject().apply {
+                                    put("id", p.id)
+                                    put("name", p.name)
+                                    put("url", p.url)
+                                    put("sha256", p.sha256)
+                                    put("note", p.note)
+                                    put("builtin", p.builtin)
+                                    put("installed", RootfsInstaller.isInstalled(this@MainActivity, p.id))
+                                }
+                            )
+                        }
+                        result.success(arr.toString())
+                    }
+                    "currentRootfs" -> result.success(RootfsInstaller.currentId(this))
                     "installRootfs" -> {
+                        val id = call.argument<String>("id") ?: RootfsInstaller.currentId(this)
                         Thread {
-                            val msg = RootfsInstaller.install(this)
+                            val msg = RootfsInstaller.install(this, id)
                             runOnUiThread { result.success(msg) }
                         }.apply {
                             name = "yaya-rootfs-install"
                             start()
                         }
+                    }
+                    "setCurrentRootfs" -> {
+                        val id = call.argument<String>("id") ?: ""
+                        RootfsInstaller.setCurrent(this, id)
+                        result.success(true)
+                    }
+                    "resetRootfs" -> {
+                        val id = call.argument<String>("id") ?: ""
+                        result.success(RootfsInstaller.reset(this, id))
+                    }
+                    "addRootfsProfile" -> {
+                        val name = call.argument<String>("name") ?: ""
+                        val url = call.argument<String>("url") ?: ""
+                        val sha256 = call.argument<String>("sha256") ?: ""
+                        result.success(RootfsInstaller.addCustom(this, name, url, sha256))
+                    }
+                    "removeRootfsProfile" -> {
+                        val id = call.argument<String>("id") ?: ""
+                        result.success(RootfsInstaller.removeCustom(this, id))
                     }
                     "startContainer" -> {
                         val ok = try {

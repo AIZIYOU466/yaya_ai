@@ -46,11 +46,50 @@ class AgentChannel {
   static Future<bool> rootfsInstalled() async =>
       await _method.invokeMethod<bool>('rootfsInstalled').timeout(_timeout) ?? false;
 
-  /// 下载并安装 Alpine rootfs（阻塞至完成，约 4MB，官方源 + SHA256 校验）。
-  static Future<String> installRootfs() async =>
-      await _method.invokeMethod<String>('installRootfs')
+  /// 镜像目录列表（含内置与自定义）。
+  static Future<List<Map<String, dynamic>>> rootfsProfiles() async {
+    final raw = await _method
+            .invokeMethod<String>('rootfsProfiles')
+            .timeout(_timeout) ??
+        '[]';
+    return (jsonDecode(raw) as List)
+        .map((e) => e as Map<String, dynamic>)
+        .toList();
+  }
+
+  /// 当前使用中的镜像 id。
+  static Future<String> currentRootfs() async =>
+      await _method.invokeMethod<String>('currentRootfs').timeout(_timeout) ?? 'alpine';
+
+  /// 下载并安装指定镜像（阻塞至完成，官方源 + SHA256 校验）。
+  static Future<String> installRootfs(String id) async =>
+      await _method.invokeMethod<String>('installRootfs', {'id': id})
               .timeout(const Duration(minutes: 15)) ??
           '未知结果';
+
+  /// 切换当前使用镜像。
+  static Future<bool> setCurrentRootfs(String id) async =>
+      await _method.invokeMethod<bool>('setCurrentRootfs', {'id': id}).timeout(_timeout) ?? false;
+
+  /// 重置（删除）指定镜像。
+  static Future<String> resetRootfs(String id) async =>
+      await _method.invokeMethod<String>('resetRootfs', {'id': id}).timeout(_timeout) ?? '未知结果';
+
+  /// 添加自定义镜像（URL 指向 tar.gz rootfs），返回新镜像 id。
+  static Future<String> addRootfsProfile({
+    required String name,
+    required String url,
+    String sha256 = '',
+  }) async =>
+      await _method.invokeMethod<String>('addRootfsProfile', {
+        'name': name,
+        'url': url,
+        'sha256': sha256,
+      }).timeout(_timeout) ?? '添加失败';
+
+  /// 删除自定义镜像。
+  static Future<String> removeRootfsProfile(String id) async =>
+      await _method.invokeMethod<String>('removeRootfsProfile', {'id': id}).timeout(_timeout) ?? '删除失败';
 
   static Future<bool> startContainer() async =>
       await _method.invokeMethod<bool>('startContainer').timeout(_startTimeout) ?? false;

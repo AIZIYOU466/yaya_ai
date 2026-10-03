@@ -21,7 +21,7 @@ object ProotManager {
 
     fun start(context: Context): Boolean {
         if (process?.isAlive == true) return true
-        val rootfs = RootfsInstaller.rootfsDir(context)
+        val rootfs = RootfsInstaller.rootfsDir(context, RootfsInstaller.currentId(context))
         if (!rootfs.exists()) {
             lastError = "未安装 Linux 环境（请在终端页下载安装 Alpine rootfs）"
             return false
