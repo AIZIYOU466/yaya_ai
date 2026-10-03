@@ -43,11 +43,13 @@ object RootfsInstaller {
             val dest = rootfsDir(context)
             if (dest.exists()) dest.deleteRecursively()
             dest.mkdirs()
-            tmp.inputStream().use { extractTar(it, dest) }
+            val failed = tmp.inputStream().use { extractTar(it, dest) }
             tmp.delete()
-            "Linux 环境安装完成（Alpine ${if (isInstalled(context)) "已就绪" else "校验异常"}）"
+            val base = "Linux 环境安装完成（Alpine ${if (isInstalled(context)) "已就绪" else "校验异常"}）"
+            if (failed > 0) "$base（$failed 个条目被跳过）" else base
         } catch (e: Exception) {
-            "安装失败：${e::class.java.simpleName}: ${e.message ?: e}"
+            val trace = e.stackTrace.take(8).joinToString("\n") { "    at $it" }
+            "安装失败：${e::class.java.simpleName}: ${e.message ?: e}\n$trace"
         }
     }
 
@@ -82,8 +84,9 @@ object RootfsInstaller {
         return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
-    /** 解压 gzip tar 流到 dest。处理 GNU longname、符号链接；拒绝路径穿越。 */
-    private fun extractTar(input: InputStream, dest: File) {
+    /** 解压 gzip tar 流到 dest。处理 GNU longname、符号链接；拒绝路径穿越。返回失败的条目数。 */
+    private fun extractTar(input: InputStream, dest: File): Int {
+        var failed = 0
         GZIPInputStream(input).use { gz ->
             val header = ByteArray(512)
             var longName: String? = null
@@ -120,39 +123,47 @@ object RootfsInstaller {
                 }
                 val target = File(dest, clean)
 
-                when (type) {
-                    '5' -> target.mkdirs()
-                    '2' -> {
-                        // 符号链接：Android 沙箱内用 toybox ln 创建
-                        val link = header.copyOfRange(157, 257)
-                            .toString(Charsets.US_ASCII)
-                            .trimEnd('\u0000', ' ')
-                        target.parentFile?.mkdirs()
-                        target.delete()
-                        try {
-                            Runtime.getRuntime()
-                                .exec(arrayOf("ln", "-s", link, target.absolutePath))
-                                .waitFor()
-                        } catch (_: Exception) {
+                try {
+                    when (type) {
+                        '5' -> target.mkdirs()
+                        '2' -> {
+                            // 符号链接：Android 沙箱内用 toybox ln 创建
+                            val link = header.copyOfRange(157, 257)
+                                .toString(Charsets.US_ASCII)
+                                .trimEnd('\u0000', ' ')
+                            target.parentFile?.mkdirs()
+                            target.delete()
+                            val created = try {
+                                Runtime.getRuntime()
+                                    .exec(arrayOf("ln", "-s", link, target.absolutePath))
+                                    .waitFor() == 0
+                            } catch (_: Exception) {
+                                false
+                            }
+                            if (!created) failed++
                         }
-                    }
-                    else -> {
-                        target.parentFile?.mkdirs()
-                        FileOutputStream(target).use { out ->
-                            val buf = ByteArray(8192)
-                            var remaining = size
-                            while (remaining > 0) {
-                                val n = gz.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
-                                if (n < 0) break
-                                out.write(buf, 0, n)
-                                remaining -= n
+                        else -> {
+                            target.parentFile?.mkdirs()
+                            FileOutputStream(target).use { out ->
+                                val buf = ByteArray(8192)
+                                var remaining = size
+                                while (remaining > 0) {
+                                    val n = gz.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+                                    if (n < 0) break
+                                    out.write(buf, 0, n)
+                                    remaining -= n
+                                }
                             }
                         }
                     }
+                } catch (e: Exception) {
+                    // 单条目失败不中断安装；关键文件（etc/alpine-release 等）在则可继续使用
+                    failed++
                 }
                 skipFully(gz, (512 - (size % 512)) % 512)
             }
         }
+        return failed
     }
 
     private fun readFully(input: InputStream, buf: ByteArray): Boolean {

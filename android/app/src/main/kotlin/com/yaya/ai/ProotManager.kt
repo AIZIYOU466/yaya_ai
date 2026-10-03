@@ -42,7 +42,11 @@ object ProotManager {
         )
         try {
             val pb = ProcessBuilder(*cmd)
-            pb.environment()["LD_LIBRARY_PATH"] = proot.parentFile.absolutePath
+            val libDir = proot.parentFile.absolutePath
+            pb.environment()["LD_LIBRARY_PATH"] = libDir
+            // termux proot 硬编码了 loader 绝对路径（/data/data/com.termux/...），
+            // 必须用 PROOT_LOADER 指回我们解压的位置。
+            pb.environment()["PROOT_LOADER"] = "$libDir/libexec/proot/loader"
             process = pb.redirectErrorStream(true).start()
             lastError = null
             pumpOutput()
