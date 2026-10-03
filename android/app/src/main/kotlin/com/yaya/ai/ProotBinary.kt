@@ -5,55 +5,38 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * 内置 proot 二进制（termux 官方 proot 5.1.107.96 aarch64，随 APK assets 打包）。
+ * 内置 proot 二进制定位与依赖准备。
  *
- * 运行时首次解压到 filesDir/yaya-bin（可执行位 + LD_LIBRARY_PATH 指回同目录，
- * 满足 proot 对 libtalloc.so.2 / libandroid-shmem.so 的依赖；loader 位于
- * bin/libexec/proot/ 供 proot 自动发现）。
+ * - proot / loader 以 native lib 形式随 jniLibs 打包（libproot.so /
+ *   libproot_loader.so），安装后落在 nativeLibraryDir（apk_data_file 域），
+ *   这是 targetSdk 29+ 上唯一允许 app execve 的位置（filesDir 的
+ *   app_data_file 被内核 W^X 禁止）。
+ * - 两个依赖库（libtalloc.so.2 / libandroid-shmem.so）从 assets 解压到
+ *   filesDir/yaya-libs：它们只需被 dlopen（不需要 exec 权限），app_data_file
+ *   的 dlopen 在 Android 上允许。
  */
 object ProotBinary {
-    private const val ASSETS_PREFIX = "proot"
-    private const val BIN_DIR = "yaya-bin"
+    private const val LIBS_DIR = "yaya-libs"
 
-    /** 确保 proot 就绪并返回其可执行文件；失败抛带原因的异常。 */
-    fun ensure(context: Context): File {
-        val dir = File(context.filesDir, BIN_DIR)
-        val proot = File(dir, "proot")
-        if (proot.exists() && proot.canExecute()) return proot
-
-        dir.mkdirs()
-        // 目录需可遍历（exec 依赖目录 x 位）
-        dir.setExecutable(true, false)
-        copyAsset(context, "$ASSETS_PREFIX/proot", proot)
-        makeExecutable(proot)
-
-        for (name in listOf("loader", "loader32")) {
-            val target = File(dir, "libexec/proot/$name")
-            target.parentFile?.mkdirs()
-            copyAsset(context, "$ASSETS_PREFIX/libexec/proot/$name", target)
-            makeExecutable(target)
-        }
-        for (name in listOf("libtalloc.so.2", "libandroid-shmem.so")) {
-            copyAsset(context, "$ASSETS_PREFIX/$name", File(dir, name))
-        }
-        if (!proot.canExecute()) {
-            throw IllegalStateException("proot 无法获得执行权限（SELinux 可能拒绝 data 目录 exec）")
+    /** 定位 nativeLibraryDir 中打包的 proot 可执行文件；未打包则抛异常。 */
+    fun find(context: Context): File {
+        val dir = File(context.applicationInfo.nativeLibraryDir)
+        val proot = File(dir, "libproot.so")
+        if (!proot.exists()) {
+            throw IllegalStateException("proot 未打包（当前 ABI 不支持，需 arm64 设备）")
         }
         return proot
     }
 
-    /** 设置全用户执行位；setExecutable 失败时用 chmod 兜底。 */
-    private fun makeExecutable(file: File) {
-        file.setExecutable(true, false)
-        file.setReadable(true, false)
-        if (!file.canExecute()) {
-            try {
-                Runtime.getRuntime()
-                    .exec(arrayOf("chmod", "755", file.absolutePath))
-                    .waitFor()
-            } catch (_: Exception) {
-            }
+    /** 确保依赖库就绪并返回其目录（供 LD_LIBRARY_PATH 使用）。 */
+    fun ensureLibs(context: Context): File {
+        val dir = File(context.filesDir, LIBS_DIR)
+        if (!File(dir, "libtalloc.so.2").exists()) {
+            dir.mkdirs()
+            copyAsset(context, "proot/libtalloc.so.2", File(dir, "libtalloc.so.2"))
+            copyAsset(context, "proot/libandroid-shmem.so", File(dir, "libandroid-shmem.so"))
         }
+        return dir
     }
 
     private fun copyAsset(context: Context, asset: String, target: File) {

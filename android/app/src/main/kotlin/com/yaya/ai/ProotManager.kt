@@ -27,7 +27,7 @@ object ProotManager {
             return false
         }
         val proot = try {
-            ProotBinary.ensure(context)
+            ProotBinary.find(context)
         } catch (e: Exception) {
             lastError = "proot 初始化失败：${e.message ?: e}"
             return false
@@ -43,10 +43,11 @@ object ProotManager {
         try {
             val pb = ProcessBuilder(*cmd)
             val libDir = proot.parentFile.absolutePath
-            pb.environment()["LD_LIBRARY_PATH"] = libDir
+            val depsDir = ProotBinary.ensureLibs(context).absolutePath
+            pb.environment()["LD_LIBRARY_PATH"] = "$libDir:$depsDir"
             // termux proot 硬编码了 loader 绝对路径（/data/data/com.termux/...），
-            // 必须用 PROOT_LOADER 指回我们解压的位置。
-            pb.environment()["PROOT_LOADER"] = "$libDir/libexec/proot/loader"
+            // 必须用 PROOT_LOADER 指回 nativeLibraryDir 中的打包副本。
+            pb.environment()["PROOT_LOADER"] = "$libDir/libproot_loader.so"
             process = pb.redirectErrorStream(true).start()
             lastError = null
             pumpOutput()

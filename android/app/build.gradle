@@ -73,6 +73,14 @@ android {
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
+
+    // proot 二进制以 native lib 形式打包；必须解压到 nativeLibraryDir
+    // （apk_data_file 域允许 exec，filesDir 的 app_data_file 在 targetSdk 29+ 被 W^X 禁止）。
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 // 交叉编译 Rust Agent Core → jniLibs（AGENTS.md R5/R6/R8）。

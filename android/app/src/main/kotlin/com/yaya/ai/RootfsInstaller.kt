@@ -99,10 +99,11 @@ object RootfsInstaller {
                 val name = longName ?: rawName
                 longName = null
 
+                // tar 的 size 字段是八进制（如 "00000000000000000520" = 336 字节）
                 val size = header.copyOfRange(124, 136)
                     .toString(Charsets.US_ASCII)
                     .trimEnd('\u0000', ' ')
-                    .toLongOrNull() ?: 0L
+                    .toLongOrNull(8) ?: 0L
                 val type = header[156].toInt().toChar()
 
                 if (type == 'L') {
