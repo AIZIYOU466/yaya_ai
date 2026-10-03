@@ -90,6 +90,16 @@ class MainActivity : FlutterActivity() {
                     }
                     "localAvailable" -> result.success(agentHost.localAvailable())
                     "networkAvailable" -> result.success(isNetworkAvailable())
+                    "rootfsInstalled" -> result.success(RootfsInstaller.isInstalled(this))
+                    "installRootfs" -> {
+                        Thread {
+                            val msg = RootfsInstaller.install(this)
+                            runOnUiThread { result.success(msg) }
+                        }.apply {
+                            name = "yaya-rootfs-install"
+                            start()
+                        }
+                    }
                     "startContainer" -> result.success(ProotManager.start(this))
                     "stopContainer" -> {
                         ProotManager.stop()

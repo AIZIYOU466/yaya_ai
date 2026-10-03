@@ -18,7 +18,17 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
   final ScrollController _scrollController = ScrollController();
   final List<String> _output = [];
   bool _isRunning = false;
+  bool _rootfsReady = false;
+  bool _installing = false;
   StreamSubscription<String>? _commandSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkRootfs();
+    });
+  }
 
   @override
   void dispose() {
@@ -26,6 +36,21 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
     _scrollController.dispose();
     _commandSubscription?.cancel();
     super.dispose();
+  }
+
+  Future<void> _checkRootfs() async {
+    final ok = await AgentChannel.rootfsInstalled();
+    if (!mounted) return;
+    setState(() => _rootfsReady = ok);
+  }
+
+  Future<void> _installRootfs() async {
+    setState(() => _installing = true);
+    final msg = await AgentChannel.installRootfs();
+    if (!mounted) return;
+    setState(() => _installing = false);
+    await _checkRootfs();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   void _scrollToBottom() {
@@ -48,8 +73,9 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       });
       if (!ok) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('启动容器失败，请先下载 Debian rootfs')),
+          const SnackBar(content: Text('启动失败：未安装 Linux 环境（请先点上方「安装」）')),
         );
+        _checkRootfs();
       }
     }
   }
@@ -116,6 +142,32 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
       ),
       body: Column(
         children: [
+          if (!_rootfsReady)
+            Container(
+              color: Theme.of(context)
+                  .colorScheme
+                  .surfaceContainerHighest
+                  .withOpacity(0.3),
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  const Icon(Icons.info_outline),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _installing
+                          ? '正在下载并安装 Alpine Linux 环境（约 4MB）...'
+                          : '未安装 Linux 环境，终端不可用。',
+                    ),
+                  ),
+                  if (!_installing)
+                    FilledButton(
+                      onPressed: _installRootfs,
+                      child: const Text('安装'),
+                    ),
+                ],
+              ),
+            ),
           Expanded(
             child: Container(
               color: Colors.black87,

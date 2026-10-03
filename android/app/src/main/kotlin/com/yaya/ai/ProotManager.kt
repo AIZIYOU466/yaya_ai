@@ -18,7 +18,7 @@ object ProotManager {
 
     fun start(context: Context): Boolean {
         if (process?.isAlive == true) return true
-        val rootfs = File(context.filesDir.absolutePath + "/debian_rootfs")
+        val rootfs = RootfsInstaller.rootfsDir(context)
         if (!rootfs.exists()) return false
 
         val cmd = arrayOf(
@@ -26,7 +26,8 @@ object ProotManager {
             "--rootfs=${rootfs.absolutePath}",
             "--bind=/dev", "--bind=/proc", "--bind=/sys",
             "--bind=/storage/emulated/0:/sdcard",
-            "/bin/bash", "-l"
+            // Alpine 默认只有 busybox sh（无 bash），用 /bin/sh 保证通用。
+            "/bin/sh", "-l"
         )
         process = ProcessBuilder(*cmd).redirectErrorStream(true).start()
         pumpOutput()
@@ -74,7 +75,7 @@ object ProotManager {
     fun runCommandBlocking(context: Context, command: String, timeoutMs: Long): String {
         if (process?.isAlive != true) {
             if (!start(context)) {
-                throw IllegalStateException("终端容器未启动，且缺少 Debian rootfs（files/debian_rootfs）")
+                throw IllegalStateException("未安装 Linux 环境（请在终端页下载安装 Alpine rootfs）")
             }
         }
         val p = process ?: throw IllegalStateException("终端容器未启动")

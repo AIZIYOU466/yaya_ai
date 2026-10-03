@@ -42,6 +42,16 @@ class AgentChannel {
   static Future<bool> networkAvailable() async =>
       await _method.invokeMethod<bool>('networkAvailable').timeout(_timeout) ?? false;
 
+  /// Linux rootfs 是否已安装（终端容器可用）。
+  static Future<bool> rootfsInstalled() async =>
+      await _method.invokeMethod<bool>('rootfsInstalled').timeout(_timeout) ?? false;
+
+  /// 下载并安装 Alpine rootfs（阻塞至完成，约 4MB，官方源 + SHA256 校验）。
+  static Future<String> installRootfs() async =>
+      await _method.invokeMethod<String>('installRootfs')
+              .timeout(const Duration(minutes: 15)) ??
+          '未知结果';
+
   static Future<bool> startContainer() async =>
       await _method.invokeMethod<bool>('startContainer').timeout(_startTimeout) ?? false;
 
