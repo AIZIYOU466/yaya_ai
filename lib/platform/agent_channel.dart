@@ -58,6 +58,10 @@ class AgentChannel {
   static Future<bool> stopContainer() async =>
       await _method.invokeMethod<bool>('stopContainer').timeout(_timeout) ?? false;
 
+  /// 最近一次容器启动失败的详细原因。
+  static Future<String?> containerError() async =>
+      await _method.invokeMethod<String>('containerError').timeout(_timeout);
+
   /// 在终端容器执行命令，逐行返回输出。
   static Stream<String> executeCommand(String command) async* {
     final stream = _model.receiveBroadcastStream(jsonEncode({'command': command}));

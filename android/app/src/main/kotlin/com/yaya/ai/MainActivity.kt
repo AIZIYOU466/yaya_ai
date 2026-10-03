@@ -100,7 +100,16 @@ class MainActivity : FlutterActivity() {
                             start()
                         }
                     }
-                    "startContainer" -> result.success(ProotManager.start(this))
+                    "startContainer" -> {
+                        val ok = try {
+                            ProotManager.start(this)
+                        } catch (e: Exception) {
+                            ProotManager.lastError = e.message ?: e.toString()
+                            false
+                        }
+                        result.success(ok)
+                    }
+                    "containerError" -> result.success(ProotManager.lastError)
                     "stopContainer" -> {
                         ProotManager.stop()
                         result.success(true)

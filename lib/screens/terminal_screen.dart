@@ -72,8 +72,10 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         _isRunning = ok;
       });
       if (!ok) {
+        final err = await AgentChannel.containerError();
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('启动失败：未安装 Linux 环境（请先点上方「安装」）')),
+          SnackBar(content: Text('启动失败：${err ?? '未知原因'}')),
         );
         _checkRootfs();
       }

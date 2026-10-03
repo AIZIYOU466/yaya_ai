@@ -47,7 +47,7 @@ object RootfsInstaller {
             tmp.delete()
             "Linux 环境安装完成（Alpine ${if (isInstalled(context)) "已就绪" else "校验异常"}）"
         } catch (e: Exception) {
-            "安装失败：${e.message ?: e.toString()}"
+            "安装失败：${e::class.java.simpleName}: ${e.message ?: e}"
         }
     }
 
@@ -103,10 +103,11 @@ object RootfsInstaller {
                 val type = header[156].toInt().toChar()
 
                 if (type == 'L') {
-                    // GNU longname：下一段数据即真实文件名
+                    // GNU longname：下一段数据即真实文件名（数据后还有 512 对齐 padding）
                     val data = ByteArray(size.toInt())
                     readFully(gz, data)
                     longName = String(data, Charsets.US_ASCII).trimEnd('\u0000')
+                    skipFully(gz, (512 - (size % 512)) % 512)
                     continue
                 }
 
