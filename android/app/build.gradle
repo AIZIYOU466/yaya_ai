@@ -45,9 +45,14 @@ android {
 
     buildTypes {
         release {
-            // CI 经 Secret 注入稳定 keystore（AIZIYOU466 配置 ANDROID_KEYSTORE_*），
-            // 未配置时回退 debug 签名（本地开发），保证可覆盖安装需配置后构建。
-            signingConfig = signingConfigs.release
+            // CI 注入 keystore（Secret ANDROID_KEYSTORE_B64 还原）时用正式签名，可覆盖安装；
+            // 未配置时回退 debug 签名（本地开发/未配 Secret 的 CI），保证构建可用。
+            def releaseKeystore = file("yaya-release.keystore")
+            def storePass = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            def keyPass = System.getenv("ANDROID_KEY_PASSWORD")
+            signingConfig = (releaseKeystore.exists() && storePass != null && keyPass != null)
+                    ? signingConfigs.release
+                    : signingConfigs.debug
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
