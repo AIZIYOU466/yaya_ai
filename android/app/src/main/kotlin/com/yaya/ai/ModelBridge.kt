@@ -4,8 +4,8 @@ object ModelBridge {
     const val STUB_NOTICE =
         "[STUB] 当前为桩实现，推理结果不可用（llama.cpp 未编译，使用 -PenableLlamaCpp=true 构建）"
 
-    private var modelLoaded = false
-    private var currentModelPath: String? = null
+    @Volatile private var modelLoaded = false
+    @Volatile private var currentModelPath: String? = null
 
     private val libLoaded = try {
         System.loadLibrary("yaya_llama")

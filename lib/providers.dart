@@ -1,8 +1,11 @@
+import 'dart:convert';
+
 import 'package:equatable/equatable.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:riverpod/riverpod.dart';
 
 import 'models.dart';
+import 'platform/agent_channel.dart';
 
 /// AI 配置状态
 class AIConfigState extends Equatable {
@@ -33,45 +36,6 @@ class AIConfigState extends Equatable {
 
   @override
   String toString() => 'AIConfigState(config: $config, isLoading: $isLoading)';
-}
-
-/// 终端容器状态
-class TerminalState extends Equatable {
-  final bool isRunning;
-  final String? shellPrompt;
-  final String? error;
-  final List<String> recentCommands;
-  final List<String> history;
-
-  const TerminalState({
-    this.isRunning = false,
-    this.shellPrompt,
-    this.error,
-    this.recentCommands = const [],
-    this.history = const [],
-  });
-
-  TerminalState copyWith({
-    bool? isRunning,
-    String? shellPrompt,
-    String? error,
-    List<String>? recentCommands,
-    List<String>? history,
-  }) {
-    return TerminalState(
-      isRunning: isRunning ?? this.isRunning,
-      shellPrompt: shellPrompt ?? this.shellPrompt,
-      error: error ?? this.error,
-      recentCommands: recentCommands ?? this.recentCommands,
-      history: history ?? this.history,
-    );
-  }
-
-  @override
-  List<Object?> get props => [isRunning, shellPrompt, error, recentCommands, history];
-
-  @override
-  String toString() => 'TerminalState(isRunning: $isRunning)';
 }
 
 /// MCP 服务器列表状态
@@ -119,6 +83,7 @@ class AIConfigNotifier extends AsyncNotifier<AIConfigState> {
     final baseUrl = prefs.getString('ai_base_url') ?? '';
     final apiKey = prefs.getString('ai_api_key') ?? '';
     final modelName = prefs.getString('ai_model_name') ?? 'gpt-3.5-turbo';
+    final modelPath = prefs.getString('ai_model_path') ?? '';
     final isStream = prefs.getBool('ai_is_stream') ?? true;
 
     return AIConfigState(
@@ -126,6 +91,7 @@ class AIConfigNotifier extends AsyncNotifier<AIConfigState> {
         baseUrl: baseUrl,
         apiKey: apiKey,
         modelName: modelName,
+        modelPath: modelPath,
         isStream: isStream,
       ),
     );
@@ -139,6 +105,7 @@ class AIConfigNotifier extends AsyncNotifier<AIConfigState> {
       await prefs.setString('ai_base_url', config.baseUrl);
       await prefs.setString('ai_api_key', config.apiKey);
       await prefs.setString('ai_model_name', config.modelName);
+      await prefs.setString('ai_model_path', config.modelPath);
       await prefs.setBool('ai_is_stream', config.isStream);
 
       state = AsyncValue.data(AIConfigState(config: config));
@@ -157,81 +124,27 @@ class AIConfigNotifier extends AsyncNotifier<AIConfigState> {
     state = AsyncValue.loading();
 
     try {
-      // 这里可以添加实际的连接测试逻辑
-      // 暂时模拟成功
-      await Future.delayed(const Duration(seconds: 1));
-      state = AsyncValue.data(current);
+      final cfg = current.config!;
+      // 真实检查（不再模拟成功）：端侧库是否就绪 + 云端地址是否合法。
+      final localOk = await AgentChannel.localAvailable();
+      final uri = Uri.tryParse(cfg.baseUrl);
+      final cloudOk = cfg.baseUrl.isNotEmpty &&
+          uri != null &&
+          (uri.scheme == 'http' || uri.scheme == 'https');
+      if (!localOk && !cloudOk) {
+        state = AsyncValue.error(
+          AIConfigState(
+            config: cfg,
+            error: '端侧模型未就绪，且云端 Base URL 不合法（需 http(s):// 开头）',
+          ),
+          StackTrace.current,
+        );
+        return;
+      }
+      state = AsyncValue.data(AIConfigState(config: cfg));
     } catch (e) {
       state = AsyncValue.error(
-        current.copyWith(error: '连接测试失败: $e'),
-        StackTrace.current,
-      );
-    }
-  }
-}
-
-/// 终端容器 Provider
-final terminalStateProvider =
-    AsyncNotifierProvider<TerminalNotifier, TerminalState>(TerminalNotifier.new);
-
-class TerminalNotifier extends AsyncNotifier<TerminalState> {
-  @override
-  Future<TerminalState> build() async {
-    return const TerminalState();
-  }
-
-  Future<void> startContainer() async {
-    state = const AsyncValue.loading();
-
-    try {
-      // TODO: 实现实际的容器启动逻辑
-      // 模拟启动过程
-      await Future.delayed(const Duration(seconds: 2));
-      state = AsyncValue.data(
-        const TerminalState(isRunning: true, shellPrompt: '#'),
-      );
-    } catch (e) {
-      state = AsyncValue.error(
-        TerminalState(error: '启动容器失败: $e'),
-        StackTrace.current,
-      );
-    }
-  }
-
-  Future<void> stopContainer() async {
-    state = const AsyncValue.loading();
-
-    try {
-      // TODO: 实现实际的容器停止逻辑
-      await Future.delayed(const Duration(seconds: 1));
-      state = AsyncValue.data(const TerminalState(isRunning: false));
-    } catch (e) {
-      state = AsyncValue.error(
-        TerminalState(error: '停止容器失败: $e'),
-        StackTrace.current,
-      );
-    }
-  }
-
-  Future<void> executeCommand(String command) async {
-    final current = state.value;
-    if (current == null || !current.isRunning) return;
-
-    try {
-      // TODO: 实现实际的命令执行逻辑
-      // 模拟执行
-      final output = '$command\noutput: ...';
-      final updatedCommands = [...current.recentCommands, command];
-
-      state = AsyncValue.data(
-        current.copyWith(
-          recentCommands: updatedCommands,
-          shellPrompt: '#',
-        ),
-      );
-    } catch (e) {
-      state = AsyncValue.error(
-        TerminalState(error: '执行命令失败: $e'),
+        AIConfigState(config: current.config, error: '连接测试失败: $e'),
         StackTrace.current,
       );
     }
@@ -243,51 +156,53 @@ final mcpServersProvider =
     AsyncNotifierProvider<MCPServersNotifier, MCPServersState>(MCPServersNotifier.new);
 
 class MCPServersNotifier extends AsyncNotifier<MCPServersState> {
+  static const _prefsKey = 'mcp_servers';
+
   @override
   Future<MCPServersState> build() async {
-    // TODO: 加载 MCP 配置
-    return const MCPServersState();
+    await Future.delayed(Duration.zero);
+    return _load();
+  }
+
+  Future<MCPServersState> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_prefsKey);
+    if (raw == null || raw.isEmpty) return const MCPServersState();
+    try {
+      final list = (jsonDecode(raw) as List)
+          .map((e) => MCPServerInfo.fromJson(e as Map<String, dynamic>))
+          .toList();
+      return MCPServersState(servers: list);
+    } catch (e) {
+      throw Exception('MCP 配置解析失败: $e');
+    }
   }
 
   Future<void> loadServers() async {
     state = const AsyncValue.loading();
-
-    try {
-      // TODO: 从配置文件加载 MCP 服务器列表
-      // 模拟加载
-      await Future.delayed(const Duration(seconds: 1));
-      state = AsyncValue.data(
-        const MCPServersState(servers: [
-          MCPServerInfo(name: 'file-tools', type: 'stdio', enabled: true),
-          MCPServerInfo(name: 'web-search', type: 'http', enabled: false),
-        ]),
-      );
-    } catch (e) {
-      state = AsyncValue.error(
-        MCPServersState(error: '加载 MCP 服务器失败: $e'),
-        StackTrace.current,
-      );
-    }
+    state = await AsyncValue.guard(_load);
   }
 
   Future<void> toggleServer(String name) async {
     final current = state.value;
     if (current == null) return;
 
-    try {
-      final updatedServers = current.servers.map((server) {
-        if (server.name == name) {
-          return server.copyWith(enabled: !server.enabled);
-        }
-        return server;
-      }).toList();
+    final updatedServers = current.servers
+        .map((server) => server.name == name
+            ? server.copyWith(enabled: !server.enabled)
+            : server)
+        .toList();
 
-      state = AsyncValue.data(
-        current.copyWith(servers: updatedServers),
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _prefsKey,
+        jsonEncode(updatedServers.map((s) => s.toJson()).toList()),
       );
+      state = AsyncValue.data(current.copyWith(servers: updatedServers));
     } catch (e) {
       state = AsyncValue.error(
-        MCPServersState(error: '切换 MCP 服务器失败: $e'),
+        MCPServersState(error: '保存 MCP 配置失败: $e'),
         StackTrace.current,
       );
     }
@@ -301,6 +216,7 @@ class MCPServerInfo extends Equatable {
   final bool enabled;
   final String? url;
   final String? command;
+  final List<String> args;
 
   const MCPServerInfo({
     required this.name,
@@ -308,7 +224,29 @@ class MCPServerInfo extends Equatable {
     required this.enabled,
     this.url,
     this.command,
+    this.args = const [],
   });
+
+  factory MCPServerInfo.fromJson(Map<String, dynamic> json) {
+    return MCPServerInfo(
+      name: json['name'] as String? ?? '',
+      type: json['type'] as String? ?? 'stdio',
+      enabled: json['enabled'] as bool? ?? false,
+      url: json['url'] as String?,
+      command: json['command'] as String?,
+      args: (json['args'] as List?)?.map((e) => e as String).toList() ?? const [],
+    );
+  }
+
+  /// 与下发给 Kotlin 的 `mcpServers` 字段保持一致。
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'type': type,
+        'enabled': enabled,
+        if (url != null) 'url': url,
+        if (command != null) 'command': command,
+        'args': args,
+      };
 
   MCPServerInfo copyWith({
     String? name,
@@ -316,6 +254,7 @@ class MCPServerInfo extends Equatable {
     bool? enabled,
     String? url,
     String? command,
+    List<String>? args,
   }) {
     return MCPServerInfo(
       name: name ?? this.name,
@@ -323,11 +262,12 @@ class MCPServerInfo extends Equatable {
       enabled: enabled ?? this.enabled,
       url: url ?? this.url,
       command: command ?? this.command,
+      args: args ?? this.args,
     );
   }
 
   @override
-  List<Object?> get props => [name, type, enabled, url, command];
+  List<Object?> get props => [name, type, enabled, url, command, args];
 
   @override
   String toString() => 'MCPServerInfo(name: $name)';

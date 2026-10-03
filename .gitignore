@@ -25,6 +25,13 @@ android/key.properties
 *.freezed.dart
 *.mocks.dart
 
+# Rust
+/target/
+
+# cargo-ndk 产物与 llama.cpp 源码
+android/app/src/main/jniLibs/
+android/app/src/main/cpp/llama_cpp/
+
 # Logs
 *.log
 

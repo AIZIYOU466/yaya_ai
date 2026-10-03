@@ -87,6 +87,12 @@ class _TerminalScreenState extends ConsumerState<TerminalScreen> {
         });
         _scrollToBottom();
       },
+      onError: (Object e) {
+        setState(() {
+          _output.add('错误: $e');
+        });
+        _scrollToBottom();
+      },
     );
   }
 

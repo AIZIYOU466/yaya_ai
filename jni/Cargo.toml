@@ -1,0 +1,20 @@
+[package]
+name = "yaya-core-jni"
+version = "0.1.0"
+edition = "2021"
+description = "Kotlin ↔ Rust Agent Core 的 JNI 桥（AGENTS.md R5/R6）"
+
+[lib]
+name = "yaya_core_jni"
+crate-type = ["cdylib"]
+
+[features]
+default = ["cloud-http"]
+# 云端 OpenAI 兼容后端（reqwest + rustls，含 C 依赖 ring）。
+# 关闭后本 crate 为纯 Rust，可在无 C 交叉编译器时对 Android target 做编译检查。
+cloud-http = ["yaya-core/cloud-http"]
+
+[dependencies]
+yaya-core = { path = "../core" }
+jni = "0.21"
+serde_json = "1"

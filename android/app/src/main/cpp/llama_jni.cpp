@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <string>
 #include <vector>
+#include <atomic>
 #include <android/log.h>
 
 #define TAG "yaya_llama"
@@ -11,7 +12,7 @@
 #ifdef LLAMA_STUB
 
 // STUB 构建：默认路径。Kotlin 侧 ModelBridge.isStub() 会读到 true，
-// ModelRouter 据此避开端侧，绝不伪装成真实推理结果。
+// Rust Core 的路由（core/src/agent/router.rs）据此避开端侧，绝不伪装成真实推理结果。
 
 JNIEXPORT jboolean JNICALL
 Java_com_yaya_ai_ModelBridge_nativeIsStub(JNIEnv*, jobject) {
@@ -36,6 +37,10 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
     jstring msg = env->NewStringUTF("[STUB] 当前为桩实现，推理结果不可用");
     env->CallVoidMethod(callback, onToken, msg);
     env->DeleteLocalRef(msg);
+    env->DeleteLocalRef(cbClass);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
     return JNI_FALSE;
 }
 
@@ -55,7 +60,7 @@ Java_com_yaya_ai_ModelBridge_nativeCancel(JNIEnv*, jobject) {
 static llama_model* g_model = nullptr;
 static llama_context* g_ctx = nullptr;
 static llama_sampler* g_sampler = nullptr;
-static bool g_cancelled = false;
+static std::atomic<bool> g_cancelled{false};
 static bool g_backend_inited = false;
 
 JNIEXPORT jboolean JNICALL
@@ -141,7 +146,7 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
     }
     batch.n_tokens = n_prompt;
 
-    g_cancelled = false;
+    g_cancelled.store(false);
 
     jclass cbClass = env->GetObjectClass(callback);
     jmethodID onToken = env->GetMethodID(cbClass, "onToken", "(Ljava/lang/String;)V");
@@ -164,6 +169,12 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
             jstring jToken = env->NewStringUTF(std::string(buf, n).c_str());
             env->CallVoidMethod(callback, onToken, jToken);
             env->DeleteLocalRef(jToken);
+            // Kotlin 回调抛异常时立刻清理并中止生成，避免挂起异常破坏后续 JNI 调用。
+            if (env->ExceptionCheck()) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+                break;
+            }
         }
 
         idx = n_prompt + i;
@@ -187,7 +198,7 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
 
 JNIEXPORT void JNICALL
 Java_com_yaya_ai_ModelBridge_nativeCancel(JNIEnv*, jobject) {
-    g_cancelled = true;
+    g_cancelled.store(true);
 }
 
 #endif  // LLAMA_STUB

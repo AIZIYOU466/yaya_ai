@@ -1,49 +1,58 @@
 import 'dart:convert';
+
 import 'package:flutter/services.dart';
 
+/// Dart UI ↔ Kotlin 执行层通道（AGENTS.md R5）。
+///
+/// Agent 循环在 Rust Core 中运行，本通道只负责：启动/停止任务、接收事件流、
+/// 以及终端容器的启停与命令流。
 class AgentChannel {
   static const _method = MethodChannel('com.yaya.ai/agent');
+  static const _events = EventChannel('com.yaya.ai/agent/events');
   static const _model = EventChannel('com.yaya.ai/model');
+  static const _timeout = Duration(seconds: 10);
+  static const _startTimeout = Duration(seconds: 30);
 
-  static Future<Map<String, dynamic>> observeScreen() async {
-    final result = await _method.invokeMethod<String>('observeScreen');
-    if (result == null) return {};
-    return jsonDecode(result) as Map<String, dynamic>;
+  /// Agent 事件流（每项为事件 JSON 字符串，协议见 core/src/agent/events.rs）。
+  static Stream<String> get agentEvents =>
+      _events.receiveBroadcastStream().map((event) => event as String);
+
+  /// 启动一次 Agent 任务（在 Kotlin 后台线程运行，事件经 [agentEvents] 回推）。
+  static Future<bool> startAgent({
+    required String taskId,
+    required String prompt,
+    required Map<String, dynamic> config,
+  }) async {
+    final ok = await _method.invokeMethod<bool>('startAgent', {
+      'taskId': taskId,
+      'prompt': prompt,
+      'configJson': jsonEncode(config),
+    }).timeout(_timeout);
+    return ok ?? false;
   }
 
-  static Future<bool> executeAction(Map<String, dynamic> action) async {
-    final data = jsonEncode(action);
-    return await _method.invokeMethod<bool>('executeAction', data) ?? false;
-  }
+  static Future<bool> stopAgent() async =>
+      await _method.invokeMethod<bool>('stopAgent').timeout(_timeout) ?? false;
 
-  static Future<bool> startAgentService() async {
-    return await _method.invokeMethod<bool>('startAgentService') ?? false;
-  }
+  /// 端侧本地模型是否可用（非 STUB）。
+  static Future<bool> localAvailable() async =>
+      await _method.invokeMethod<bool>('localAvailable').timeout(_timeout) ?? false;
 
-  static Future<bool> stopAgentService() async {
-    return await _method.invokeMethod<bool>('stopAgentService') ?? false;
-  }
+  /// 当前网络是否可达（供路由 hints 的 networkOk 使用）。
+  static Future<bool> networkAvailable() async =>
+      await _method.invokeMethod<bool>('networkAvailable').timeout(_timeout) ?? false;
 
-  static Future<bool> startContainer() async {
-    return await _method.invokeMethod<bool>('startContainer') ?? false;
-  }
+  static Future<bool> startContainer() async =>
+      await _method.invokeMethod<bool>('startContainer').timeout(_startTimeout) ?? false;
 
-  static Future<bool> stopContainer() async {
-    return await _method.invokeMethod<bool>('stopContainer') ?? false;
-  }
+  static Future<bool> stopContainer() async =>
+      await _method.invokeMethod<bool>('stopContainer').timeout(_timeout) ?? false;
 
+  /// 在终端容器执行命令，逐行返回输出。
   static Stream<String> executeCommand(String command) async* {
-    final stream = _model.receiveBroadcastStream(command);
+    final stream = _model.receiveBroadcastStream(jsonEncode({'command': command}));
     await for (final chunk in stream) {
       yield chunk as String;
-    }
-  }
-
-  static Stream<String> runModel(String prompt, {String? modelPath}) async* {
-    final params = jsonEncode({'prompt': prompt, if (modelPath != null) 'modelPath': modelPath});
-    final stream = _model.receiveBroadcastStream(params);
-    await for (final token in stream) {
-      yield token as String;
     }
   }
 }

@@ -41,6 +41,17 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
+      # Rust Core 经 JNI 供 Android 调用（AGENTS.md R5/R6/R8）：先交叉编译 .so 到 jniLibs。
+      - name: Install Rust targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+
+      - name: Build Rust Core for Android
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        run: bash scripts/build-android.sh
+
       - name: Build APK (release)
         run: flutter build apk --release
 

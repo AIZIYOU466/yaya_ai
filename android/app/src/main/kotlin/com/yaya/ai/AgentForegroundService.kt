@@ -32,7 +32,13 @@ class AgentForegroundService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannel()
-        val notification = Notification.Builder(this, CHANNEL_ID)
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        val notification = builder
             .setContentTitle("YAYai Agent")
             .setContentText("Agent 运行中")
             .setSmallIcon(android.R.drawable.ic_dialog_info)

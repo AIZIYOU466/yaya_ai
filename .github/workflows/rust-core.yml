@@ -1,0 +1,57 @@
+name: Rust Core Check
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'core/**'
+      - 'jni/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust-core.yml'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'core/**'
+      - 'jni/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust-core.yml'
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    container:
+      image: rust:1.99
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - name: Check workspace (默认无 cloud-http)
+        run: cargo check --workspace
+
+      - name: Run core unit tests
+        run: cargo test -p yaya-core
+
+      - name: Check cloud-http feature compiles
+        run: cargo check -p yaya-core --features cloud-http
+
+      # 无需 NDK：check 不链接，可验证 Android target 的编译（关 cloud 以避开 C 依赖 ring）。
+      - name: Check Android target compiles
+        run: |
+          rustup target add aarch64-linux-android
+          cargo check -p yaya-core --target aarch64-linux-android
+          cargo check -p yaya-core-jni --target aarch64-linux-android --no-default-features

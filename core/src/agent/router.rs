@@ -1,6 +1,8 @@
 //! 三层模型路由策略（AGENTS.md R2 的可执行规范）。
+//!
+//! 唯一实现：Android 经 JNI、桌面同进程，均调用本模块（AGENTS.md R6）。
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Backend {
     Jni,
     Desktop,
@@ -84,7 +86,11 @@ pub fn route(prompt: &str, h: &RouteHints) -> Result<Backend, String> {
     // 7. 明确错误，禁止静默假数据
     Err(format!(
         "无可用后端：本地={}，桌面={}，云端已配置={}，网络={}",
-        if h.local_ok { "可用" } else { "STUB/不可用" },
+        if h.local_ok {
+            "可用"
+        } else {
+            "STUB/不可用"
+        },
         if h.desktop_ok { "可达" } else { "不可达" },
         h.cloud_ok,
         h.network_ok
@@ -118,13 +124,17 @@ mod tests {
     }
 
     const SIMPLE: &str = "你好";
-    const MEDIUM: &str = "请解释一下下面这段自然语言处理流程的原理和工程取舍，大概三百字左右的内容就好";
     const HARD: &str = "```rust\nfn main() {}\n```";
+
+    /// 中等长度提示词（256 < 字数 ≤ 1024）；用运行时构造避免字面量长度写错。
+    fn medium() -> String {
+        "这是一段用于复杂度判定的中等长度提示词。".repeat(20)
+    }
 
     #[test]
     fn complexity_boundaries() {
         assert_eq!(complexity(SIMPLE), Complexity::Simple);
-        assert_eq!(complexity(MEDIUM), Complexity::Medium);
+        assert_eq!(complexity(&medium()), Complexity::Medium);
         assert_eq!(complexity(HARD), Complexity::Hard);
         assert_eq!(complexity(&"x".repeat(1025)), Complexity::Hard);
     }
@@ -146,7 +156,7 @@ mod tests {
     #[test]
     fn rule3_medium_hard_goes_desktop() {
         assert_eq!(
-            route(MEDIUM, &h(None, false, true, true, true)),
+            route(&medium(), &h(None, false, true, true, true)),
             Ok(Backend::Desktop)
         );
         assert_eq!(
@@ -166,7 +176,7 @@ mod tests {
     #[test]
     fn rule5_cloud_fallback_when_desktop_down() {
         assert_eq!(
-            route(MEDIUM, &h(None, true, false, false, true)),
+            route(&medium(), &h(None, true, false, false, true)),
             Ok(Backend::Cloud)
         );
     }
@@ -174,7 +184,7 @@ mod tests {
     #[test]
     fn rule5_skipped_without_network() {
         // 云端已配置但断网，且本地/桌面均不可用 → 必须显式错误（含网络原因）
-        match route(MEDIUM, &h(None, true, false, false, false)) {
+        match route(&medium(), &h(None, true, false, false, false)) {
             Ok(b) => panic!("断网且无本地/桌面时必须报错，实际 {:?}", b),
             Err(e) => assert!(e.contains("网络=false"), "错误信息需含网络原因: {}", e),
         }
@@ -184,7 +194,7 @@ mod tests {
     fn rule6_local_fallback() {
         // 桌面不可达、云端未配置：端侧兜底
         assert_eq!(
-            route(MEDIUM, &h(None, false, false, true, false)),
+            route(&medium(), &h(None, false, false, true, false)),
             Ok(Backend::Jni)
         );
     }

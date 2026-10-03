@@ -1,6 +1,9 @@
-//! 任务状态机（AGENTS.md R6 规范源，桌面 AgentCore 服务与 Android TaskState.kt 同构）。
+//! 任务状态机（AGENTS.md R6 规范源；循环机 [`crate::agent::loop`] 驱动，Android/桌面共用）。
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TaskState {
     Idle,
     Planning,
@@ -22,6 +25,8 @@ pub fn can_transition(from: TaskState, to: TaskState) -> bool {
             | (Planning, Failed)
             | (Executing, Streaming)
             | (Executing, Failed)
+            // 多步：本轮流式产出工具调用后，回到 Executing 执行并进入下一轮
+            | (Streaming, Executing)
             | (Streaming, Done)
             | (Streaming, Failed)
             | (Done, Idle)
@@ -36,7 +41,9 @@ pub struct TaskMachine {
 
 impl Default for TaskMachine {
     fn default() -> Self {
-        TaskMachine { state: TaskState::Idle }
+        TaskMachine {
+            state: TaskState::Idle,
+        }
     }
 }
 
@@ -54,10 +61,7 @@ impl TaskMachine {
             self.state = to;
             Ok(to)
         } else {
-            Err(format!(
-                "非法状态转移: {:?} -> {:?}",
-                self.state, to
-            ))
+            Err(format!("非法状态转移: {:?} -> {:?}", self.state, to))
         }
     }
 
@@ -99,6 +103,17 @@ mod tests {
         m.transition(Planning).unwrap();
         assert!(m.transition(Done).is_err());
         assert!(m.transition(Idle).is_err());
+    }
+
+    #[test]
+    fn tool_loop_reenters_executing() {
+        let mut m = TaskMachine::new();
+        for s in [Planning, Executing, Streaming] {
+            m.transition(s).unwrap();
+        }
+        assert_eq!(m.transition(Executing).unwrap(), Executing);
+        m.transition(Streaming).unwrap();
+        assert_eq!(m.transition(Done).unwrap(), Done);
     }
 
     #[test]

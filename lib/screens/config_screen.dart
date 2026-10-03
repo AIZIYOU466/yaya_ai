@@ -16,6 +16,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
   final _baseUrlController = TextEditingController();
   final _apiKeyController = TextEditingController();
   final _modelNameController = TextEditingController();
+  final _modelPathController = TextEditingController();
   bool _isStream = true;
   bool _isLoading = false;
 
@@ -33,6 +34,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
     _baseUrlController.dispose();
     _apiKeyController.dispose();
     _modelNameController.dispose();
+    _modelPathController.dispose();
     super.dispose();
   }
 
@@ -42,6 +44,7 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       _baseUrlController.text = config.config!.baseUrl;
       _apiKeyController.text = config.config!.apiKey;
       _modelNameController.text = config.config!.modelName;
+      _modelPathController.text = config.config!.modelPath;
       setState(() {
         _isStream = config.config!.isStream;
       });
@@ -53,11 +56,22 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
       _isLoading = true;
     });
 
+    final baseUrl = _baseUrlController.text.trim();
+    final modelName = _modelNameController.text.trim();
+    if (baseUrl.isEmpty || modelName.isEmpty) {
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Base URL 与模型名称不能为空')),
+      );
+      return;
+    }
+
     try {
       final config = AIConfig(
-        baseUrl: _baseUrlController.text.trim(),
+        baseUrl: baseUrl,
         apiKey: _apiKeyController.text.trim(),
-        modelName: _modelNameController.text.trim(),
+        modelName: modelName,
+        modelPath: _modelPathController.text.trim(),
         isStream: _isStream,
       );
 
@@ -84,7 +98,12 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
 
     try {
       await ref.read(aiConfigProvider.notifier).testConnection();
-
+      // 检查真实结果（testConnection 失败走 AsyncValue.error，await 不抛异常）。
+      final after = ref.read(aiConfigProvider);
+      final err = after.hasError ? after.error : after.valueOrNull?.error;
+      if (err != null) {
+        throw Exception(err);
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('连接成功')),
       );
@@ -137,6 +156,11 @@ class _ConfigScreenState extends ConsumerState<ConfigScreen> {
                   MaskedInput(
                     controller: _modelNameController,
                     hintText: 'Model Name (e.g., gpt-3.5-turbo)',
+                  ),
+                  const SizedBox(height: 16),
+                  MaskedInput(
+                    controller: _modelPathController,
+                    hintText: '端侧 .gguf 路径（可选，如 /sdcard/Download/model.gguf）',
                   ),
                   const SizedBox(height: 16),
                   Row(

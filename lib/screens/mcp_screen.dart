@@ -47,14 +47,6 @@ class _MCPScreenState extends ConsumerState<MCPScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('MCP 服务器'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.add),
-            onPressed: () {
-              // TODO: 添加 MCP 服务器
-            },
-          ),
-        ],
       ),
       body: mcpState.when(
         data: (data) {
@@ -92,7 +84,11 @@ class _MCPScreenState extends ConsumerState<MCPScreen> {
                           ],
                         ),
                         const SizedBox(height: 8),
-                        Text('类型: ${server.type}'),
+                        Text(
+                          server.type == 'stdio'
+                              ? '类型: stdio'
+                              : '类型: ${server.type}（暂不支持）',
+                        ),
                         if (server.url != null)
                           Text('URL: ${server.url}'),
                         if (server.command != null)

@@ -6,8 +6,8 @@ class GlassCard extends StatelessWidget {
   final EdgeInsetsGeometry? padding;
   final EdgeInsetsGeometry? margin;
   final Color? backgroundColor;
-  final double? borderRadius;
-  final double? elevation;
+  final double borderRadius;
+  final double elevation;
   final VoidCallback? onTap;
 
   const GlassCard({
@@ -30,17 +30,17 @@ class GlassCard extends StatelessWidget {
         color: Colors.transparent,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(borderRadius!),
+          borderRadius: BorderRadius.circular(borderRadius),
           child: Container(
             padding: padding,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(borderRadius!),
+              borderRadius: BorderRadius.circular(borderRadius),
               color: backgroundColor ?? colors.surfaceContainerHighest,
               border: Border.all(color: colors.outlineVariant, width: 1),
               boxShadow: [
                 BoxShadow(
                   color: Colors.black.withOpacity(0.1),
-                  blurRadius: elevation!,
+                  blurRadius: elevation,
                   offset: const Offset(0, 4),
                 ),
               ],

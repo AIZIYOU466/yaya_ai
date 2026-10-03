@@ -4,6 +4,8 @@ import android.content.Context
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 object ProotManager {
     const val EXIT_MARKER = "<YAYA_EXIT_"
@@ -55,12 +57,46 @@ object ProotManager {
         lineListener = listener
     }
 
+    @Synchronized
     fun executeCommand(command: String) {
         val p = process ?: return
         // 哨兵行通知 ModelStreamHandler 结束本次输出流（不销毁容器进程）
         val payload = "$command; printf '\\n$EXIT_MARKER%s>\\n' \"\$?\"\n"
         p.outputStream.write(payload.toByteArray())
         p.outputStream.flush()
+    }
+
+    /**
+     * 同步执行一条命令并返回其输出，供 Agent 的 terminal_exec 工具使用。
+     * 容器未启动则先启动；缺少 rootfs 时抛出明确错误（不静默）。
+     */
+    @Synchronized
+    fun runCommandBlocking(context: Context, command: String, timeoutMs: Long): String {
+        if (process?.isAlive != true) {
+            if (!start(context)) {
+                throw IllegalStateException("终端容器未启动，且缺少 Debian rootfs（files/debian_rootfs）")
+            }
+        }
+        val p = process ?: throw IllegalStateException("终端容器未启动")
+
+        val marker = "$EXIT_MARKER${System.nanoTime()}>"
+        val output = StringBuilder()
+        val done = CountDownLatch(1)
+        val previous = lineListener
+        lineListener = { line ->
+            if (line.contains(marker)) done.countDown() else output.append(line).append('\n')
+        }
+
+        val payload = "$command; printf '\\n%s\\n' \"$marker\"\n"
+        p.outputStream.write(payload.toByteArray())
+        p.outputStream.flush()
+
+        val finished = done.await(timeoutMs, TimeUnit.MILLISECONDS)
+        lineListener = previous
+        if (!finished) {
+            throw IllegalStateException("命令超时（${timeoutMs}ms）")
+        }
+        return output.toString().trimEnd()
     }
 
     fun stopCommand() {
