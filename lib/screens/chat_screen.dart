@@ -369,52 +369,14 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
-  /// 全局统计弹窗（任务 17）。
-  Future<void> _showStats() async {
-    final raw = await AgentChannel.getStats();
-    final Map<String, dynamic> stats;
-    try {
-      stats = jsonDecode(raw) as Map<String, dynamic>;
-    } catch (_) {
-      return;
-    }
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      builder: (ctx) => SimpleDialog(
-        title: Text(L10n.t(ref.read(languageProvider), 'stats_title')),
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: stats.entries
-                  .map(
-                    (e) => Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 4),
-                      child: Text(
-                        '${e.key}: ${e.value}',
-                        style: const TextStyle(fontSize: 14),
-                      ),
-                    ),
-                  )
-                  .toList(),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 工作区浏览弹窗（任务 21）：显示根路径与顶层文件列表。
   Future<void> _showWorkspace() async {
     final root = await AgentChannel.workspaceRoot();
     final raw = await AgentChannel.workspaceList('');
-    final Map<String, dynamic> data;
+    var data = <String, dynamic>{};
     try {
       data = jsonDecode(raw) as Map<String, dynamic>;
     } catch (_) {
-      data = const {};
+      // 保持空 map：解析失败按空数据处理。
     }
     if (!mounted) return;
     final ok = data['ok'] as bool? ?? false;
