@@ -87,13 +87,6 @@ class AgentHost(
 
     // ── 以下为 Rust 经 JNI 回调的方法 ──────────────────────────
 
-    fun observeScreen(): String =
-        AgentAccessibilityService.instance?.captureScreenTree() ?: ""
-
-    /** 供 Rust 读取屏幕截图（base64 data URL）；API<30 或服务未运行时返回空。 */
-    fun observeScreenImage(): String =
-        AgentAccessibilityService.instance?.captureScreenshot() ?: ""
-
     fun executeAction(json: String): String {
         return try {
             val action = JSONObject(json)
@@ -114,14 +107,10 @@ class AgentHost(
                     sendNotification(action.optString("title", ""), action.optString("body", ""))
                     JSONObject().put("ok", true).put("message", "已发送通知").toString()
                 }
-                else -> {
-                    val service = AgentAccessibilityService.instance
-                    if (service == null) {
-                        JSONObject().put("ok", false).put("message", "无障碍服务未运行").toString()
-                    } else {
-                        service.executeAction(action).toString()
-                    }
-                }
+                else ->
+                    JSONObject().put("ok", false)
+                        .put("message", "未知动作: ${action.optString("type")}")
+                        .toString()
             }
         } catch (e: Exception) {
             JSONObject().put("ok", false).put("message", e.message ?: "执行失败").toString()

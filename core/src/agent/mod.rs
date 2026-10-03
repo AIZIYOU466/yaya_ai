@@ -1,14 +1,13 @@
 //! Agent Core（AGENTS.md R6）：循环机 + 任务状态机 + 模型路由 + 工具层（含 MCP）+ OpenAI 解析器。
 //!
-//! 跨端唯一实现：Android 经 JNI 调用本模块；平台差异由 [`ScreenObserver`] /
-//! [`ActionExecutor`] / [`ModelBackend`] / [`McpClient`] 四个 trait 注入。
+//! 跨端唯一实现：Android 经 JNI 调用本模块；平台差异由 [`ActionExecutor`] /
+//! [`ModelBackend`] / [`McpClient`] 三个 trait 注入。
 
 pub mod events;
 pub mod executor;
 pub mod local_parse;
 pub mod mcp;
 pub mod model;
-pub mod observer;
 pub mod openai;
 pub mod router;
 pub mod run;
@@ -24,20 +23,18 @@ pub use model::ModelBackend;
 pub use router::{Backend, RouteHints};
 
 pub use events::Event;
-pub use executor::{Action, ActionExecutor, ScrollDir, SystemKind};
+pub use executor::{Action, ActionExecutor};
 pub use mcp::{McpClient, McpTool};
 pub use model::{
     Content, ContentPart, GenerateRequest, ImageUrl, Message, ModelOutput, ToolCall, ToolSpec,
 };
-pub use observer::{Node, Rect, ScreenObserver};
 pub use router::{complexity, route, Complexity};
 pub use run::{run_loop, RunConfig};
 pub use state::{TaskMachine, TaskState};
 
-/// 循环机运行所需的四类平台能力 + 已注册的模型后端。
+/// 循环机运行所需的三类平台能力 + 已注册的模型后端。
 pub struct AgentCore {
     backends: HashMap<Backend, Box<dyn ModelBackend>>,
-    pub observer: Box<dyn ScreenObserver>,
     pub executor: Box<dyn ActionExecutor>,
     /// MCP 客户端（可选）；未注册时工具集仅含内置工具。
     pub mcp: Option<Box<dyn McpClient>>,
@@ -47,10 +44,9 @@ pub struct AgentCore {
 }
 
 impl AgentCore {
-    pub fn new(observer: Box<dyn ScreenObserver>, executor: Box<dyn ActionExecutor>) -> Self {
+    pub fn new(executor: Box<dyn ActionExecutor>) -> Self {
         AgentCore {
             backends: HashMap::new(),
-            observer,
             executor,
             mcp: None,
             hints: RouteHints::default(),

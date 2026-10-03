@@ -1,12 +1,12 @@
 //! Kotlin ↔ Rust Agent Core 的 JNI 桥（AGENTS.md R5/R6）。
 //!
 //! 循环机、状态机、路由、工具层、OpenAI 解析全部在 `yaya-core`；本 crate 只做两件事：
-//! 1. 用 Kotlin 实现的 `ScreenObserver` / `ActionExecutor`（经回调注入循环机）
+//! 1. 用 Kotlin 实现的 `ActionExecutor` / `ModelBackend` / `McpClient`（经回调注入循环机）
 //! 2. 组装后端与配置，调用 `run_loop`，把事件回推给 Kotlin
 //!
 //! Kotlin 侧 `com.yaya.ai.AgentHost` 需实现：
-//! `observeScreen(): String`、`executeAction(json: String): String`、
-//! `generate(requestJson: String): String`、`onEvent(json: String)`。
+//! `executeAction(json: String): String`、`generatePrompt(requestJson: String): String`、
+//! `onEvent(json: String)`。
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,7 +21,6 @@ use yaya_core::agent::executor::{Action, ActionExecutor};
 use yaya_core::agent::local_parse;
 use yaya_core::agent::mcp::{McpClient, McpTool};
 use yaya_core::agent::model::{GenerateRequest, ModelBackend, ModelOutput};
-use yaya_core::agent::observer::{Node, ScreenObserver};
 use yaya_core::agent::router::{Backend, RouteHints};
 use yaya_core::agent::{run_loop, AgentCore, Event, RunConfig};
 
@@ -132,24 +131,6 @@ impl JniHost {
         }) {
             eprintln!("[yaya-jni] {method} 回调失败: {e}");
         }
-    }
-}
-
-impl ScreenObserver for JniHost {
-    fn observe(&mut self) -> Result<Node, String> {
-        let json = self.call_str0("observeScreen")?;
-        if json.trim().is_empty() {
-            return Err("无障碍服务未运行或界面树为空".to_string());
-        }
-        serde_json::from_str(&json).map_err(|e| format!("界面树解析失败: {e}"))
-    }
-
-    fn observe_image(&mut self) -> Result<String, String> {
-        let json = self.call_str0("observeScreenImage")?;
-        if json.trim().is_empty() {
-            return Err("截图不可用（需 Android 11+ 且无障碍服务运行中）".to_string());
-        }
-        Ok(json)
     }
 }
 
@@ -382,7 +363,7 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
             })
             .unwrap_or(false);
 
-        let mut core = AgentCore::new(Box::new(jhost.clone()), Box::new(jhost.clone()));
+        let mut core = AgentCore::new(Box::new(jhost.clone()));
 
         if local_available && !model_path.is_empty() {
             core.register_backend(Box::new(LocalBackend {

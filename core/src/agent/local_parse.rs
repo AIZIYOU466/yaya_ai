@@ -124,30 +124,30 @@ mod tests {
 
     #[test]
     fn extracts_single_tool_call() {
-        let text = "\n<tool_call>\n{\"name\":\"observe_screen\",\"arguments\":{}}\n</tool_call>\n";
+        let text = "\n<tool_call>\n{\"name\":\"notify\",\"arguments\":{}}\n</tool_call>\n";
         let calls = extract_tool_calls(text);
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].function.name, "observe_screen");
+        assert_eq!(calls[0].function.name, "notify");
         assert_eq!(calls[0].function.arguments, "{}");
     }
 
     #[test]
     fn extracts_multiple_tool_calls_with_trailing_text() {
-        let text = "先看屏幕\n<tool_call>\n{\"name\":\"observe_screen\",\"arguments\":{}}\n</tool_call>\n然后\n<tool_call>\n{\"name\":\"tap_node\",\"arguments\":{\"id\":\"0/1\"}}\n</tool_call>\n完成";
+        let text = "先看结果\n<tool_call>\n{\"name\":\"notify\",\"arguments\":{}}\n</tool_call>\n然后\n<tool_call>\n{\"name\":\"clipboard_read\",\"arguments\":{}}\n</tool_call>\n完成";
         let calls = extract_tool_calls(text);
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].function.name, "observe_screen");
-        assert_eq!(calls[1].function.name, "tap_node");
-        assert!(calls[1].function.arguments.contains("0/1"));
+        assert_eq!(calls[0].function.name, "notify");
+        assert_eq!(calls[1].function.name, "clipboard_read");
+        assert_eq!(calls[1].function.arguments, "{}");
     }
 
     #[test]
     fn object_arguments_serialized_to_json_string() {
-        let text = "<tool_call>\n{\"name\":\"scroll_node\",\"arguments\":{\"direction\":\"forward\"}}\n</tool_call>";
+        let text = "<tool_call>\n{\"name\":\"terminal_exec\",\"arguments\":{\"command\":\"ls\"}}\n</tool_call>";
         let calls = extract_tool_calls(text);
         assert_eq!(calls.len(), 1);
         let args: Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
-        assert_eq!(args["direction"], json!("forward"));
+        assert_eq!(args["command"], json!("ls"));
     }
 
     #[test]
@@ -175,8 +175,8 @@ mod tests {
             ),
             Message::tool_result("c1", "observe_screen", "读屏成功"),
         ];
-        let prompt = render_prompt("你是 Agent", &[spec("observe_screen")], &messages);
-        assert!(prompt.contains("observe_screen"), "应含工具 schema");
+        let prompt = render_prompt("你是 Agent", &[spec("notify")], &messages);
+        assert!(prompt.contains("notify"), "应含工具 schema");
         assert!(prompt.contains("<|im_start|>user"));
         assert!(prompt.contains("把字体调大"));
         assert!(

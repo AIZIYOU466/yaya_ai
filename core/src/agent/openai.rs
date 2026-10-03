@@ -188,16 +188,16 @@ mod tests {
     fn assembles_split_tool_call_arguments() {
         let mut acc = ResponseAccumulator::new();
         // 首片：带 id/name + 半个 arguments
-        acc.feed_line(r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"tap_node","arguments":"{\"id\":\"0/"}}]}}]}"#).unwrap();
+        acc.feed_line(r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"notify","arguments":"{\"title\":\"t\""}}]}}]}"#).unwrap();
         // 次片：仅 arguments 续片
-        acc.feed_line(r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1\"}"}}]}}]}"#).unwrap();
+        acc.feed_line(r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}"#).unwrap();
         acc.feed_line("data: [DONE]").unwrap();
         assert!(acc.is_done());
         let out = acc.finish();
         assert_eq!(out.tool_calls.len(), 1);
         assert_eq!(out.tool_calls[0].id, "call_1");
-        assert_eq!(out.tool_calls[0].function.name, "tap_node");
-        assert_eq!(out.tool_calls[0].function.arguments, r#"{"id":"0/1"}"#);
+        assert_eq!(out.tool_calls[0].function.name, "notify");
+        assert_eq!(out.tool_calls[0].function.arguments, r#"{"title":"t"}"#);
     }
 
     #[test]
@@ -227,8 +227,8 @@ mod tests {
         let req = GenerateRequest {
             messages: vec![Message::user("hi")],
             tools: vec![ToolSpec {
-                name: "observe_screen".into(),
-                description: "读屏".into(),
+                name: "notify".into(),
+                description: "通知".into(),
                 parameters: json!({"type":"object","properties":{}}),
             }],
             model: None,
@@ -240,18 +240,18 @@ mod tests {
         assert_eq!(body["max_tokens"], json!(64));
         assert_eq!(
             body["tools"][0]["function"]["name"],
-            json!("observe_screen")
+            json!("notify")
         );
         assert_eq!(body["messages"][0]["role"], json!("user"));
     }
 
     #[test]
     fn tool_message_serializes_tool_call_id() {
-        let m = Message::tool_result("call_1", "tap_node", "ok");
+        let m = Message::tool_result("call_1", "notify", "ok");
         let v = message_to_value(&m);
         assert_eq!(v["role"], json!("tool"));
         assert_eq!(v["tool_call_id"], json!("call_1"));
-        assert_eq!(v["name"], json!("tap_node"));
+        assert_eq!(v["name"], json!("notify"));
     }
 
     #[test]

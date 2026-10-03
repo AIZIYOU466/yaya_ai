@@ -1,16 +1,15 @@
 //! ReAct 循环机（AGENTS.md R6）：观察 → 决策 → 流式生成 → 执行工具 → 回填，驱动任务状态机。
 //!
 //! 循环机是编排者：只经 [`crate::agent::AgentCore`] 的三个 trait 与模型后端工作，
-//! 不直接接触无障碍 / llama.cpp / 坐标。
+//! 不直接接触终端 / llama.cpp / 平台细节。
 
 use serde_json::Value;
 
 use crate::agent::events::Event;
-use crate::agent::model::{Content, ContentPart, GenerateRequest, Message};
+use crate::agent::model::{Content, GenerateRequest, Message};
 use crate::agent::router::route;
 use crate::agent::state::{TaskMachine, TaskState};
 use crate::agent::tools;
-use crate::agent::tools::TOOL_OBSERVE_SCREEN_IMAGE;
 use crate::agent::AgentCore;
 
 pub struct RunConfig {
@@ -36,12 +35,11 @@ impl Default for RunConfig {
 }
 
 pub fn default_system_prompt() -> String {
-    "你是一个运行在安卓设备上的 AI Agent。你可以通过工具读取屏幕、点击/输入/滑动、\
-     执行系统操作、启动应用，并在设备终端容器中执行 shell 命令。\
-     完成任务时：先调用 observe_screen 了解当前界面，再逐步执行动作，每步之后视需要再次观察以确认结果。\
-     若无障碍界面树中找不到目标元素（如游戏、WebView 绘制区域、自绘控件），\
-     改用 observe_screen_image 获取屏幕截图，根据图中位置用 tap_node 的 x/y 坐标执行点击。\
-     一切以工具返回为准，不要臆测界面内容；若工具报错，请调整参数或换用其它工具。"
+    "你是一个运行在安卓设备上的 AI 编程与开发助手。你可以通过内置的 proot Linux 终端\
+     执行 shell 命令、运行构建与测试；通过剪贴板读写帮助用户搬运文本；通过通知提示任务进度。\
+     若用户配置了 MCP 服务器，你还可以使用其提供的开发工具（文件、git 等）。\
+     优先使用工具获取真实信息，不要臆测；若工具报错，请调整参数或换用其它工具，\
+     并把过程和结果以清晰的文本呈现给用户。"
         .to_string()
 }
 
@@ -168,41 +166,20 @@ pub fn run_loop(
         }
         emit_state(on_event, &machine)?;
 
-        // 执行工具并收集结果；observe_screen_image 的截图走多模态 user message。
-        let mut image_parts: Vec<ContentPart> = Vec::new();
-
+        // 执行工具并回填结果。
         for call in &output.tool_calls {
             let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
             on_event(Event::ToolCall {
                 name: call.function.name.clone(),
                 args,
             })?;
-            let (ok, content) = tools::dispatch(
-                call,
-                &mut *core.observer,
-                &mut *core.executor,
-                core.mcp.as_deref_mut(),
-            );
+            let (ok, content) = tools::dispatch(call, &mut *core.executor, core.mcp.as_deref_mut());
             on_event(Event::ToolResult {
                 name: call.function.name.clone(),
                 ok,
                 content: content.clone(),
             })?;
-
-            if call.function.name == TOOL_OBSERVE_SCREEN_IMAGE && ok {
-                // 截图作为多模态图片部件注入，而非纯文本 tool result。
-                image_parts.push(Content::image(&content));
-            } else {
-                messages.push(Message::tool_result(&call.id, &call.function.name, content));
-            }
-        }
-
-        // 将截图以 user message 注入，模型可通过视觉理解屏幕内容。
-        if !image_parts.is_empty() {
-            messages.push(Message::user_with_images(
-                "以下是当前屏幕截图，请据此分析界面内容。",
-                image_parts,
-            ));
+            messages.push(Message::tool_result(&call.id, &call.function.name, content));
         }
 
         // 长任务：历史超出阈值时压缩，避免 token 膨胀导致后续轮次退化。
@@ -240,7 +217,6 @@ mod tests {
     use crate::agent::executor::{Action, ActionExecutor};
     use crate::agent::mcp::{McpClient, McpTool};
     use crate::agent::model::{FunctionCall, ModelBackend, ModelOutput, ToolCall};
-    use crate::agent::observer::{Node, ScreenObserver};
     use crate::agent::router::{Backend, RouteHints};
     use serde_json::json;
     use std::collections::VecDeque;
@@ -266,23 +242,6 @@ mod tests {
         }
     }
 
-    struct CountingObserver {
-        calls: usize,
-    }
-    impl ScreenObserver for CountingObserver {
-        fn observe(&mut self) -> Result<Node, String> {
-            self.calls += 1;
-            Ok(Node {
-                id: "0".into(),
-                class: "Root".into(),
-                ..Default::default()
-            })
-        }
-        fn observe_image(&mut self) -> Result<String, String> {
-            Err("图片观察未实现".to_string())
-        }
-    }
-
     struct NoopExecutor;
     impl ActionExecutor for NoopExecutor {
         fn execute(&mut self, _a: &Action) -> Result<String, String> {
@@ -290,8 +249,8 @@ mod tests {
         }
     }
 
-    fn core_with(observer: Box<dyn ScreenObserver>, steps: Vec<ModelOutput>) -> AgentCore {
-        let mut core = AgentCore::new(observer, Box::new(NoopExecutor));
+    fn core_with(steps: Vec<ModelOutput>) -> AgentCore {
+        let mut core = AgentCore::new(Box::new(NoopExecutor));
         core.register_backend(Box::new(ScriptedBackend {
             steps: steps.into(),
         }));
@@ -309,96 +268,11 @@ mod tests {
                 id: "c1".into(),
                 kind: "function".into(),
                 function: FunctionCall {
-                    name: tools::TOOL_OBSERVE_SCREEN.into(),
-                    arguments: "{}".into(),
+                    name: tools::TOOL_NOTIFY.into(),
+                    arguments: r#"{"title":"t","body":"b"}"#.into(),
                 },
             }],
         }
-    }
-
-    struct ImageObserver;
-    impl ScreenObserver for ImageObserver {
-        fn observe(&mut self) -> Result<Node, String> {
-            Ok(Node {
-                id: "0".into(),
-                class: "Root".into(),
-                ..Default::default()
-            })
-        }
-        fn observe_image(&mut self) -> Result<String, String> {
-            Ok("data:image/png;base64,AAAA".to_string())
-        }
-    }
-
-    /// 捕获每次 generate 的请求，第一轮输出 observe_screen_image 工具调用，第二轮结束。
-    struct SharedCapturingBackend {
-        seen: Arc<Mutex<Vec<GenerateRequest>>>,
-        done: bool,
-    }
-    impl ModelBackend for SharedCapturingBackend {
-        fn generate(
-            &mut self,
-            req: &GenerateRequest,
-            on_token: &mut dyn FnMut(&str) -> Result<(), String>,
-        ) -> Result<ModelOutput, String> {
-            self.seen.lock().unwrap().push(req.clone());
-            if !self.done {
-                self.done = true;
-                Ok(ModelOutput {
-                    text: String::new(),
-                    tool_calls: vec![ToolCall {
-                        id: "c1".into(),
-                        kind: "function".into(),
-                        function: FunctionCall {
-                            name: tools::TOOL_OBSERVE_SCREEN_IMAGE.into(),
-                            arguments: "{}".into(),
-                        },
-                    }],
-                })
-            } else {
-                on_token("完成")?;
-                Ok(ModelOutput {
-                    text: "完成".into(),
-                    tool_calls: vec![],
-                })
-            }
-        }
-        fn backend(&self) -> Backend {
-            Backend::Cloud
-        }
-    }
-
-    #[test]
-    fn screen_image_is_injected_as_multimodal_user_message() {
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let mut core = AgentCore::new(Box::new(ImageObserver), Box::new(NoopExecutor));
-        core.register_backend(Box::new(SharedCapturingBackend {
-            seen: seen.clone(),
-            done: false,
-        }));
-        core.hints = RouteHints {
-            force: Some(Backend::Cloud),
-            ..Default::default()
-        };
-
-        let result = run_loop(&mut core, "看屏幕", &RunConfig::default(), &mut |_| {
-            Ok(())
-        });
-        assert_eq!(result.unwrap(), "完成");
-
-        let reqs = seen.lock().unwrap();
-        assert_eq!(reqs.len(), 2, "应有两轮 generate");
-        let last = &reqs[1];
-        assert!(
-            last.messages.iter().any(|m| matches!(
-                &m.content,
-                Some(Content::Parts(parts))
-                    if parts.iter().any(|p| matches!(p, ContentPart::ImageUrl { .. }))
-            )),
-            "截图应以多模态 ImageUrl 部件注入下一条 user message"
-        );
-        // 不带图的普通 tool result 不应出现（observe_screen_image 结果不进 tool messages）。
-        assert!(last.messages.iter().all(|m| m.role != "tool"));
     }
 
     #[test]
@@ -503,9 +377,7 @@ mod tests {
 
     #[test]
     fn executes_tool_then_finishes() {
-        let mut core = core_with(
-            Box::new(CountingObserver { calls: 0 }),
-            vec![
+        let mut core = core_with(vec![
                 tool_call_output(),
                 ModelOutput {
                     text: "搞定".into(),
@@ -535,16 +407,14 @@ mod tests {
             tool_call_output(),
             tool_call_output(),
         ];
-        let mut core = core_with(Box::new(CountingObserver { calls: 0 }), steps);
+        let mut core = core_with(steps);
         let err = run_loop(&mut core, "循环", &cfg, &mut |_| Ok(())).unwrap_err();
         assert!(err.contains("最大步数"));
     }
 
     #[test]
     fn cancel_via_event_sink_aborts() {
-        let mut core = core_with(
-            Box::new(CountingObserver { calls: 0 }),
-            vec![
+        let mut core = core_with(vec![
                 tool_call_output(),
                 ModelOutput {
                     text: "x".into(),
@@ -562,10 +432,7 @@ mod tests {
 
     #[test]
     fn reports_error_when_no_backend_registered() {
-        let mut core = AgentCore::new(
-            Box::new(CountingObserver { calls: 0 }),
-            Box::new(NoopExecutor),
-        );
+        let mut core = AgentCore::new(Box::new(NoopExecutor));
         let err = run_loop(&mut core, "hi", &RunConfig::default(), &mut |_| Ok(())).unwrap_err();
         assert!(err.contains("无可用后端"));
     }
@@ -608,9 +475,7 @@ mod tests {
     #[test]
     fn mcp_tool_call_is_routed_and_fed_back() {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let mut core = core_with(
-            Box::new(CountingObserver { calls: 0 }),
-            vec![
+        let mut core = core_with(vec![
                 mcp_call_output(),
                 ModelOutput {
                     text: "完成".into(),
@@ -648,9 +513,7 @@ mod tests {
 
     #[test]
     fn mcp_list_failure_emits_notice_and_keeps_builtin_tools() {
-        let mut core = core_with(
-            Box::new(CountingObserver { calls: 0 }),
-            vec![
+        let mut core = core_with(vec![
                 tool_call_output(),
                 ModelOutput {
                     text: "ok".into(),

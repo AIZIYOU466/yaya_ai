@@ -2,7 +2,7 @@
 
 本文件定义项目架构规则，**未经用户同意不得修改**。偏离本文件的改动必须先征得用户确认并同步更新本文件。
 
-**定位**：运行在 Android 设备上的 AI 驱动代码编辑器 —— 内置终端、AI Agent、MCP 协议。**单端工程**（不含桌面端，无 gRPC）。
+**定位**：运行在 Android 设备上的**聊天与开发者助手 Agent** —— AI 对话、内置 proot 终端、MCP 工具。**不操控设备**（无无障碍/屏幕操作/系统手势）。**单端工程**（不含桌面端，无 gRPC）。
 
 ## R2 三层模型路由（Model Router 默认策略，唯一规范源 `core/src/agent/router.rs`）
 
@@ -51,9 +51,10 @@
   - `core/src/agent/run.rs` —— ReAct 循环机
   - `core/src/agent/state.rs` —— 任务状态机
   - `core/src/agent/router.rs` —— Model Router
-  - `core/src/agent/observer.rs` / `executor.rs` / `model.rs` —— 三个平台 trait
+  - `core/src/agent/executor.rs` / `model.rs` —— 平台 trait（`ActionExecutor` / `ModelBackend`）；`mcp.rs` 定义 `McpClient`
+  - 内置工具：`terminal_exec` / `clipboard_read` / `clipboard_write` / `notify`（`tools.rs`）；设备操控类工具已移除
   - `core/src/agent/tools.rs` / `openai.rs` / `events.rs` / `cloud.rs` / `mcp.rs`
-- **Android 经 JNI 共享 core**：`jni/` crate 编译为 `libyaya_core_jni.so`；平台差异经 `ScreenObserver` / `ActionExecutor` / `ModelBackend` / `McpClient` 四个 trait 由 Kotlin 实现注入。
+- **Android 经 JNI 共享 core**：`jni/` crate 编译为 `libyaya_core_jni.so`；平台差异经 `ActionExecutor` / `ModelBackend` / `McpClient` 三个 trait 由 Kotlin 实现注入。
 - **禁止**在 Kotlin/Dart 侧重复实现循环、路由、工具层或 OpenAI 解析（防逻辑漂移）。
 
 ## R8 CI 默认 STUB

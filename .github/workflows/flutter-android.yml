@@ -52,6 +52,24 @@ jobs:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: bash scripts/build-android.sh
 
+      # 稳定签名：从 Secret 还原 keystore 并注入环境变量；未配置则跳过（回退 debug 签名）。
+      - name: Restore signing keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > android/app/yaya-release.keystore
+            echo "ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
+            echo "ANDROID_KEY_ALIAS=${KEY_ALIAS:-yaya}" >> $GITHUB_ENV
+            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
+            echo "keystore restored"
+          else
+            echo "ANDROID_KEYSTORE_B64 未配置，使用 debug 签名"
+          fi
+
       - name: Build APK (release)
         run: flutter build apk --release
 
