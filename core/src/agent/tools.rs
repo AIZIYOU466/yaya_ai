@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use super::executor::{Action, ActionExecutor};
 use super::mcp::{self, McpClient, McpTool};
+use super::memory::{self, MemoryStore};
 use super::model::{ToolCall, ToolSpec};
 
 pub const TOOL_TERMINAL_EXEC: &str = "terminal_exec";
@@ -77,32 +78,35 @@ pub fn mcp_specs(tools: &[McpTool]) -> Vec<ToolSpec> {
 }
 
 /// 执行一次工具调用，返回 (是否成功, 面向模型的结果文本)。
-/// 内置工具走动作 trait；`mcp__*` 走 MCP 客户端。
-pub fn dispatch(
+/// 路由顺序：记忆工具（若注册）→ MCP 工具 → 内置工具。
+pub fn dispatch<'a>(
     call: &ToolCall,
     executor: &mut dyn ActionExecutor,
     mcp: Option<&mut (dyn McpClient + 'static)>,
+    memory: Option<&'a mut Box<dyn MemoryStore>>,
 ) -> (bool, String) {
     let name = call.function.name.as_str();
+    let args: Value = match serde_json::from_str(&call.function.arguments) {
+        Ok(v) => v,
+        Err(e) => return (false, format!("参数不是合法 JSON: {e}")),
+    };
+
+    // 记忆工具（平台注册了 MemoryStore 才可能命中）。
+    if let Some(store) = memory {
+        if let Some(result) = memory::dispatch(name, &args, store.as_mut()) {
+            return result;
+        }
+    }
 
     if let Some((server, tool)) = mcp::parse(name) {
         let Some(client) = mcp else {
             return (false, format!("MCP 未启用，无法调用 {name}"));
-        };
-        let args: Value = match serde_json::from_str(&call.function.arguments) {
-            Ok(v) => v,
-            Err(e) => return (false, format!("参数不是合法 JSON: {e}")),
         };
         return match client.call_tool(server, tool, &args) {
             Ok(text) => (true, text),
             Err(e) => (false, format!("MCP 调用失败: {e}")),
         };
     }
-
-    let args: Value = match serde_json::from_str(&call.function.arguments) {
-        Ok(v) => v,
-        Err(e) => return (false, format!("参数不是合法 JSON: {e}")),
-    };
 
     let action = match build_action(name, &args) {
         Ok(a) => a,
@@ -195,7 +199,7 @@ mod tests {
     #[test]
     fn terminal_defaults_timeout() {
         let mut exec = RecordingExecutor::default();
-        let (ok, _) = dispatch(&call(TOOL_TERMINAL_EXEC, r#"{"command":"ls"}"#), &mut exec, None);
+        let (ok, _) = dispatch(&call(TOOL_TERMINAL_EXEC, r#"{"command":"ls"}"#), &mut exec, None, None);
         assert!(ok);
         assert_eq!(
             exec.seen,
@@ -213,6 +217,7 @@ mod tests {
             &call(TOOL_TERMINAL_EXEC, r#"{"command":"ls","timeout_ms":99999999}"#),
             &mut exec,
             None,
+            None,
         );
         assert!(ok);
         assert_eq!(
@@ -227,11 +232,11 @@ mod tests {
     #[test]
     fn unknown_tool_and_bad_args_are_reported_not_panicking() {
         let mut exec = RecordingExecutor::default();
-        let (ok, msg) = dispatch(&call("nope", "{}"), &mut exec, None);
+        let (ok, msg) = dispatch(&call("nope", "{}"), &mut exec, None, None);
         assert!(!ok);
         assert!(msg.contains("未知工具"));
 
-        let (ok2, msg2) = dispatch(&call(TOOL_NOTIFY, "not json"), &mut exec, None);
+        let (ok2, msg2) = dispatch(&call(TOOL_NOTIFY, "not json"), &mut exec, None, None);
         assert!(!ok2);
         assert!(msg2.contains("合法 JSON"));
     }
@@ -293,6 +298,7 @@ mod tests {
             &call("mcp__files__read", r#"{"path":"a"}"#),
             &mut exec,
             Some(&mut client),
+            None,
         );
         assert!(ok);
         assert_eq!(content, "files/read");
@@ -302,7 +308,7 @@ mod tests {
     #[test]
     fn dispatch_reports_mcp_tool_without_client() {
         let mut exec = RecordingExecutor::default();
-        let (ok, msg) = dispatch(&call("mcp__files__read", "{}"), &mut exec, None);
+        let (ok, msg) = dispatch(&call("mcp__files__read", "{}"), &mut exec, None, None);
         assert!(!ok);
         assert!(msg.contains("MCP 未启用"));
     }
@@ -315,6 +321,7 @@ mod tests {
             &call(TOOL_CLIPBOARD_WRITE, r#"{"text":"hi"}"#),
             &mut exec,
             None,
+            None,
         );
         assert!(ok);
         assert!(exec
@@ -325,6 +332,7 @@ mod tests {
         let (ok, _) = dispatch(
             &call(TOOL_NOTIFY, r#"{"title":"t","body":"b"}"#),
             &mut exec,
+            None,
             None,
         );
         assert!(ok);
@@ -337,7 +345,7 @@ mod tests {
     #[test]
     fn clipboard_read_requires_no_args() {
         let mut exec = RecordingExecutor::default();
-        let (ok, _) = dispatch(&call(TOOL_CLIPBOARD_READ, "{}"), &mut exec, None);
+        let (ok, _) = dispatch(&call(TOOL_CLIPBOARD_READ, "{}"), &mut exec, None, None);
         assert!(ok);
         assert!(exec.seen.iter().any(|a| *a == Action::ClipboardRead));
     }

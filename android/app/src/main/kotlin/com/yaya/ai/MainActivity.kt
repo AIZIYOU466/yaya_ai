@@ -89,6 +89,18 @@ class MainActivity : FlutterActivity() {
                         agentTaskThread = null
                         result.success(true)
                     }
+                    "respondApproval" -> {
+                        val id = call.argument<String>("id") ?: ""
+                        val allow = call.argument<Boolean>("allow") ?: false
+                        agentHost.submitApproval(id, allow)
+                        result.success(true)
+                    }
+                    "loadRecentSession" -> result.success(agentHost.recentSessionJson())
+                    "checkpoints" -> {
+                        val sid = call.argument<String>("sessionId") ?: ""
+                        result.success(agentHost.checkpointsJson(sid))
+                    }
+                    "getStats" -> result.success(agentHost.stats())
                     "localAvailable" -> result.success(agentHost.localAvailable())
                     "networkAvailable" -> result.success(isNetworkAvailable())
                     "rootfsInstalled" -> result.success(RootfsInstaller.isInstalledCurrent(this))

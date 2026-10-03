@@ -4,7 +4,7 @@
 
 use serde_json::{json, Value};
 
-use super::model::{FunctionCall, GenerateRequest, Message, ModelOutput, ToolCall, ToolSpec};
+use super::model::{FunctionCall, GenerateRequest, Message, ModelOutput, ToolCall, ToolSpec, Usage};
 
 /// 工具 schema → OpenAI `tools` 数组。
 pub fn tool_schema(specs: &[ToolSpec]) -> Value {
@@ -39,6 +39,10 @@ pub fn request_body(req: &GenerateRequest, model: &str, stream: bool) -> Value {
     }
     if let Some(max) = req.max_tokens {
         body["max_tokens"] = json!(max);
+    }
+    // 流式请求用量统计（OpenAI 在最后一个 chunk 携带 usage）。
+    if stream {
+        body["stream_options"] = json!({"include_usage": true});
     }
     body
 }
@@ -81,6 +85,7 @@ struct PartialToolCall {
 pub struct ResponseAccumulator {
     content: String,
     tool_calls: Vec<PartialToolCall>,
+    usage: Option<Usage>,
     done: bool,
 }
 
@@ -106,6 +111,10 @@ impl ResponseAccumulator {
         }
         let chunk: Value =
             serde_json::from_str(payload).map_err(|e| format!("SSE 解析失败: {e}"))?;
+        // 用量可在任意 chunk 出现（OpenAI 置于末个）；先吸收再处理内容。
+        if let Some(u) = chunk.get("usage").and_then(parse_usage) {
+            self.usage = Some(u);
+        }
         let Some(choices) = chunk.get("choices").and_then(|c| c.as_array()) else {
             return Ok(None);
         };
@@ -176,8 +185,27 @@ impl ResponseAccumulator {
         ModelOutput {
             text: self.content,
             tool_calls,
+            usage: self.usage,
         }
     }
+}
+
+/// 解析 `usage` 对象；缺 `prompt_tokens` 视为无效。
+fn parse_usage(v: &Value) -> Option<Usage> {
+    let prompt = v.get("prompt_tokens").and_then(|x| x.as_u64())?;
+    let completion = v
+        .get("completion_tokens")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
+    let total = v
+        .get("total_tokens")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(prompt + completion);
+    Some(Usage {
+        prompt_tokens: u32::try_from(prompt).unwrap_or(u32::MAX),
+        completion_tokens: u32::try_from(completion).unwrap_or(u32::MAX),
+        total_tokens: u32::try_from(total).unwrap_or(u32::MAX),
+    })
 }
 
 #[cfg(test)]
@@ -277,5 +305,35 @@ mod tests {
         let v = message_to_value(&m);
         assert_eq!(v["content"], json!("hi"));
         assert!(v["content"].is_string(), "纯文本 content 应序列化为字符串");
+    }
+
+    #[test]
+    fn parses_usage_from_stream_chunk() {
+        let mut acc = ResponseAccumulator::new();
+        acc.feed_line(r#"data: {"choices":[{"delta":{"content":"hi"}}]}"#)
+            .unwrap();
+        acc.feed_line(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+        )
+        .unwrap();
+        acc.feed_line("data: [DONE]").unwrap();
+        let u = acc.finish().usage.expect("应解析出 usage");
+        assert_eq!(u.prompt_tokens, 10);
+        assert_eq!(u.completion_tokens, 5);
+        assert_eq!(u.total_tokens, 15);
+    }
+
+    #[test]
+    fn requests_usage_only_when_streaming() {
+        let req = GenerateRequest {
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            model: None,
+            max_tokens: None,
+        };
+        let streamed = request_body(&req, "m", true);
+        assert_eq!(streamed["stream_options"]["include_usage"], json!(true));
+        let non_stream = request_body(&req, "m", false);
+        assert!(non_stream.get("stream_options").is_none());
     }
 }

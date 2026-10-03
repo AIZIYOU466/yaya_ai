@@ -177,6 +177,19 @@ pub struct GenerateRequest {
 pub struct ModelOutput {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
+    /// 本次生成消耗的 token（后端提供时携带；端侧通常为 None）。
+    pub usage: Option<Usage>,
+}
+
+/// 一次生成消耗的 token。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub prompt_tokens: u32,
+    #[serde(default)]
+    pub completion_tokens: u32,
+    #[serde(default)]
+    pub total_tokens: u32,
 }
 
 pub trait ModelBackend: Send {

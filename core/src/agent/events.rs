@@ -21,10 +21,23 @@ pub enum Event {
         name: String,
         args: serde_json::Value,
     },
+    /// 工具调用的策略判定（决策原因码）：供追溯每次调用为何被放行/确认/拒绝。
+    /// `verdict` ∈ `allow` / `ask` / `deny`；`reason` 说明判定依据。
+    ToolPolicy {
+        name: String,
+        verdict: String,
+        reason: String,
+    },
     ToolResult {
         name: String,
         ok: bool,
         content: String,
+    },
+    /// 一次生成的 token 用量（后端提供时发出），供 UI 累计与成本估算。
+    Usage {
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        total_tokens: u32,
     },
     /// 非致命提示（如 MCP 不可用）：不中断循环，仅供用户参考。
     Notice {

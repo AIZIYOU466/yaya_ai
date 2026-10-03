@@ -3,16 +3,23 @@
 //! 跨端唯一实现：Android 经 JNI 调用本模块；平台差异由 [`ActionExecutor`] /
 //! [`ModelBackend`] / [`McpClient`] 三个 trait 注入。
 
+pub mod canary;
+pub mod capability;
 pub mod events;
 pub mod executor;
 pub mod local_parse;
 pub mod mcp;
+pub mod memory;
 pub mod model;
 pub mod openai;
+pub mod permission;
 pub mod router;
 pub mod run;
+pub mod skill;
 pub mod state;
+pub mod subagent;
 pub mod tools;
+pub mod verifier;
 
 #[cfg(feature = "cloud-http")]
 pub mod cloud;
@@ -28,6 +35,8 @@ pub use mcp::{McpClient, McpTool};
 pub use model::{
     Content, ContentPart, GenerateRequest, ImageUrl, Message, ModelOutput, ToolCall, ToolSpec,
 };
+pub use permission::{ApprovalRequest, Approver, Reversibility, RunMode, Verdict};
+pub use memory::MemoryStore;
 pub use router::{complexity, route, Complexity};
 pub use run::{run_loop, RunConfig};
 pub use state::{TaskMachine, TaskState};
@@ -38,6 +47,10 @@ pub struct AgentCore {
     pub executor: Box<dyn ActionExecutor>,
     /// MCP 客户端（可选）；未注册时工具集仅含内置工具。
     pub mcp: Option<Box<dyn McpClient>>,
+    /// 授权确认回调（可选）；未注册时需确认的工具按拒绝处理（安全默认）。
+    pub approver: Option<Box<dyn Approver>>,
+    /// 自动记忆存储（可选）；未注册时记忆工具不暴露、无清单注入。
+    pub memory_store: Option<Box<dyn MemoryStore>>,
     /// 调用方填入的静态路由信号（force / network_ok / latency_sensitive）；
     /// 可用性信号（local_ok / desktop_ok / cloud_ok）由 [`AgentCore::effective_hints`] 依后端注册情况推导。
     pub hints: RouteHints,
@@ -49,8 +62,20 @@ impl AgentCore {
             backends: HashMap::new(),
             executor,
             mcp: None,
+            approver: None,
+            memory_store: None,
             hints: RouteHints::default(),
         }
+    }
+
+    /// 注册授权确认回调；未注册时需确认的工具按拒绝处理。
+    pub fn register_approver(&mut self, approver: Box<dyn Approver>) {
+        self.approver = Some(approver);
+    }
+
+    /// 注册自动记忆存储；未注册时记忆工具不暴露。
+    pub fn register_memory_store(&mut self, store: Box<dyn MemoryStore>) {
+        self.memory_store = Some(store);
     }
 
     /// 注册 MCP 客户端；未调用则工具集仅含内置工具。

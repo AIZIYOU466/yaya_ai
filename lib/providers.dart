@@ -6,6 +6,7 @@ import 'package:riverpod/riverpod.dart';
 
 import 'models.dart';
 import 'platform/agent_channel.dart';
+import 'l10n.dart';
 
 /// AI 配置状态
 class AIConfigState extends Equatable {
@@ -298,4 +299,56 @@ class MCPServerInfo extends Equatable {
 
   @override
   String toString() => 'MCPServerInfo(name: $name)';
+}
+
+/// Agent 运行模式（build / plan / auto）：决定写操作的拦截/确认/放行。
+final agentModeProvider =
+    NotifierProvider<AgentModeNotifier, String>(AgentModeNotifier.new);
+
+class AgentModeNotifier extends Notifier<String> {
+  static const _prefsKey = 'agent_mode';
+
+  @override
+  String build() {
+    _load();
+    return 'build';
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getString(_prefsKey);
+    if (v != null && v != state) state = v;
+  }
+
+  Future<void> set(String mode) async {
+    state = mode;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefsKey, mode);
+  }
+}
+
+/// App 界面语言（zh / en）。
+final languageProvider =
+    NotifierProvider<LanguageNotifier, String>(LanguageNotifier.new);
+
+class LanguageNotifier extends Notifier<String> {
+  static const _prefsKey = 'app_language';
+
+  @override
+  String build() {
+    _load();
+    return L10n.zh;
+  }
+
+  Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getString(_prefsKey);
+    if (v != null && v != state) state = v;
+  }
+
+  Future<void> set(String lang) async {
+    state = lang;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefsKey, lang);
+  }
 }

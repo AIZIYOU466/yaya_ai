@@ -34,6 +34,28 @@ class AgentChannel {
   static Future<bool> stopAgent() async =>
       await _method.invokeMethod<bool>('stopAgent').timeout(_timeout) ?? false;
 
+  /// 回传用户对一次授权请求的选择（见事件 `approval_request`）。
+  static Future<bool> respondApproval({required String id, required bool allow}) async =>
+      await _method
+              .invokeMethod<bool>('respondApproval', {'id': id, 'allow': allow})
+              .timeout(_timeout) ??
+          false;
+
+  /// 最近会话（`{sessionId,title,messages:[...]}`）；无会话返回 null。
+  static Future<String?> loadRecentSession() async =>
+      await _method.invokeMethod<String>('loadRecentSession').timeout(_timeout);
+
+  /// 会话检查点列表（`[{messages:[...]}]`，新 → 旧）。
+  static Future<String> checkpoints(String sessionId) async =>
+      await _method
+              .invokeMethod<String>('checkpoints', {'sessionId': sessionId})
+              .timeout(_timeout) ??
+          '[]';
+
+  /// 全局统计（`{sessions,messages,toolCalls,errors,totalTokens,checkpoints}`）。
+  static Future<String> getStats() async =>
+      await _method.invokeMethod<String>('getStats').timeout(_timeout) ?? '{}';
+
   /// 端侧本地模型是否可用（非 STUB）。
   static Future<bool> localAvailable() async =>
       await _method.invokeMethod<bool>('localAvailable').timeout(_timeout) ?? false;

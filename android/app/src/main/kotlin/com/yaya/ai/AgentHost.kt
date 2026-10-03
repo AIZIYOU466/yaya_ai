@@ -8,7 +8,9 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
 import android.util.Log
+import org.json.JSONArray
 import org.json.JSONObject
+import java.util.UUID
 
 /**
  * Kotlin ↔ Rust Core 的宿主（AGENTS.md R5/R6/R10）。
@@ -21,9 +23,17 @@ class AgentHost(
     private val context: Context,
     private val eventSink: (String) -> Unit,
 ) {
+    // 本地持久化（AGENTS.md R13）：初始化失败不阻断 Agent，仅跳过写库。
+    private val database: AgentDatabase? = try {
+        AgentDatabase.get(context)
+    } catch (_: Exception) {
+        null
+    }
     companion object {
         private const val TAG = "AgentHost"
         private const val AGENT_CHANNEL_ID = "yaya_agent"
+        /** 授权等待上限：超时按拒绝处理（安全默认）。 */
+        private const val APPROVAL_TIMEOUT_MS = 5 * 60 * 1000L
         private val libLoaded: Boolean = try {
             System.loadLibrary("yaya_core_jni")
             true
@@ -33,6 +43,16 @@ class AgentHost(
 
         fun isAvailable(): Boolean = libLoaded
     }
+
+    // 授权确认的跨线程握手：Rust 循环机（后台线程）阻塞等待，
+    // UI 线程经 [submitApproval] 回传用户选择。单任务模型，同一时刻仅一个待确认。
+    private val approvalLock = Object()
+    private var pendingApprovalId: String? = null
+    private var pendingApprovalResult: Boolean? = null
+
+    // 持久化状态：当前会话与流式 assistant 文本累积。
+    private var currentSessionId: String? = null
+    private val assistantBuffer = StringBuilder()
 
     private external fun nativeRunLoop(
         taskId: String,
@@ -47,6 +67,11 @@ class AgentHost(
     fun run(taskId: String, prompt: String, configJson: String): String {
         if (!libLoaded) {
             return "ERROR: Rust Core 库 libyaya_core_jni.so 未加载（需 scripts/build-android.sh 交叉编译）"
+        }
+        currentSessionId = taskId
+        database?.let { db ->
+            db.upsertSession(taskId, prompt.take(60))
+            db.insertMessage(taskId, "user", prompt, true)
         }
         syncMcpServers(configJson)
         return nativeRunLoop(taskId, prompt, configJson, this)
@@ -81,6 +106,65 @@ class AgentHost(
 
     fun cancel() {
         if (libLoaded) nativeCancel()
+        // 唤醒可能阻塞中的授权等待，按拒绝处理。
+        synchronized(approvalLock) {
+            pendingApprovalResult = false
+            approvalLock.notifyAll()
+        }
+    }
+
+    /**
+     * 供 Rust `JniApprover` 请求用户确认：入参 `{tool,args,reversibility}`，
+     * 返回 `{"allow":bool}`。经事件通道发 `approval_request` 给 Dart，
+     * 阻塞等待用户在 UI 上的选择；超时或取消按拒绝处理。
+     */
+    fun requestApproval(json: String): String {
+        val req = try {
+            JSONObject(json)
+        } catch (e: Exception) {
+            return JSONObject().put("allow", false).toString()
+        }
+        val id = UUID.randomUUID().toString()
+        synchronized(approvalLock) {
+            pendingApprovalId = id
+            pendingApprovalResult = null
+        }
+        eventSink(
+            JSONObject().apply {
+                put("type", "approval_request")
+                put("id", id)
+                put("tool", req.optString("tool"))
+                put("args", req.opt("args") ?: JSONObject())
+                put("reversibility", req.optString("reversibility"))
+            }.toString()
+        )
+
+        val deadline = System.currentTimeMillis() + APPROVAL_TIMEOUT_MS
+        synchronized(approvalLock) {
+            while (pendingApprovalResult == null) {
+                val remain = deadline - System.currentTimeMillis()
+                if (remain <= 0) break
+                try {
+                    approvalLock.wait(remain)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+            val allow = pendingApprovalResult == true
+            pendingApprovalId = null
+            pendingApprovalResult = null
+            return JSONObject().put("allow", allow).toString()
+        }
+    }
+
+    /** UI 线程经此回传用户对某个授权请求的选择。 */
+    fun submitApproval(id: String, allow: Boolean) {
+        synchronized(approvalLock) {
+            if (pendingApprovalId == id) {
+                pendingApprovalResult = allow
+                approvalLock.notifyAll()
+            }
+        }
     }
 
     fun localAvailable(): Boolean = ModelBridge.isAvailable() && !ModelBridge.isStub()
@@ -190,6 +274,77 @@ class AgentHost(
 
     fun onEvent(json: String) {
         eventSink(json)
+        persistEvent(json)
+    }
+
+    /** 持久化事件流：消息入库 + 工具执行前自动保存检查点。失败不打断 Agent。 */
+    private fun persistEvent(json: String) {
+        val sid = currentSessionId ?: return
+        val db = database ?: return
+        try {
+            val ev = JSONObject(json)
+            when (ev.optString("type")) {
+                "tool_call" -> {
+                    val args = ev.opt("args")
+                    db.insertMessage(sid, "tool", "调用 ${ev.optString("name")} $args", true)
+                    // 执行前快照：回滚点（AGENTS.md R13）。
+                    db.saveCheckpoint(sid, db.messagesJson(sid))
+                }
+                "tool_result" -> {
+                    db.insertMessage(sid, "tool", ev.optString("content"), ev.optBoolean("ok", false))
+                }
+                "notice" -> {
+                    db.insertMessage(sid, "system", ev.optString("message"), true)
+                }
+                "token" -> {
+                    assistantBuffer.append(ev.optString("text"))
+                }
+                "usage" -> {
+                    // 存入 messages 表供统计面板聚合（任务 17）。
+                    val total = ev.optInt("total_tokens", 0)
+                    if (total > 0) db.insertMessage(sid, "usage", total.toString(), true)
+                }
+                "tool_policy" -> {
+                    // 决策链记录（任务 18）：verdict/name/reason 存入 messages 表供复盘。
+                    val name = ev.optString("name")
+                    val verdict = ev.optString("verdict")
+                    val reason = ev.optString("reason")
+                    db.insertMessage(sid, "policy", "$verdict: $name — $reason", true)
+                }
+                "done" -> {
+                    flushAssistant()
+                }
+                "error" -> {
+                    flushAssistant()
+                    db.insertMessage(sid, "system", "错误: ${ev.optString("message")}", false)
+                }
+                // state / tool_policy / usage / approval_request 不落库。
+            }
+        } catch (_: Exception) {
+            // 持久化失败不影响 Agent 主流程。
+        }
+    }
+
+    private fun flushAssistant() {
+        val sid = currentSessionId ?: return
+        val db = database ?: return
+        val text = assistantBuffer.toString().trim()
+        assistantBuffer.setLength(0)
+        if (text.isEmpty()) return
+        db.insertMessage(sid, "assistant", text, true)
+        db.touchSession(sid)
+    }
+
+    /** 最近会话 JSON（供 Dart 重启恢复）；无会话返回 null。 */
+    fun recentSessionJson(): String? = database?.recentSessionJson()
+
+    /** 会话检查点列表 JSON：`[{messages:[...]}]`，新 → 旧。 */
+    fun checkpointsJson(sessionId: String): String {
+        val arr = JSONArray()
+        database?.checkpointMessagesList(sessionId)?.forEach { j ->
+            arr.put(JSONObject().apply { put("messages", JSONArray(j)) })
+        }
+        return arr.toString()
     }
 
     /** 供 Rust 列出 MCP 工具：`{"ok":true,"tools":[...]}` 或 `{"ok":false,"message":...}`。 */
@@ -222,4 +377,73 @@ class AgentHost(
                 .put("message", e.message ?: "MCP 调用失败")
                 .toString()
         }
+
+    // ── 技能与记忆（Rust core 经 JNI 调用，AGENTS.md R13） ──────────────────
+
+    /** 技能根目录：App 私有目录 `filesDir/skills`（不存在则创建）。 */
+    fun skillsDir(): String {
+        val dir = java.io.File(context.filesDir, "skills")
+        if (!dir.exists()) dir.mkdirs()
+        return dir.absolutePath
+    }
+
+    /** 记忆清单：`{"items":[{name,description}]}`。 */
+    fun memList(): String =
+        JSONObject().put("items", JSONArray(database?.memListJson() ?: "[]")).toString()
+
+    /** 读取记忆：`{"ok":true,"content":...}` 或 `{"ok":false,"message":...}`。 */
+    fun memRead(name: String): String {
+        val content = database?.memRead(name)
+        return if (content != null) {
+            JSONObject().put("ok", true).put("content", content).toString()
+        } else {
+            JSONObject().put("ok", false).put("message", "记忆 $name 不存在").toString()
+        }
+    }
+
+    /** 保存记忆：入参 `{name,description,content}`。 */
+    fun memSave(json: String): String {
+        val req = JSONObject(json)
+        val name = req.optString("name")
+        if (name.isEmpty()) {
+            return JSONObject().put("ok", false).put("message", "缺少 name").toString()
+        }
+        database?.memSave(name, req.optString("description"), req.optString("content"))
+        return JSONObject().put("ok", true).put("message", "已保存记忆 $name").toString()
+    }
+
+    /** 局部编辑：入参 `{name,old_string,new_string}`。 */
+    fun memEdit(json: String): String {
+        val req = JSONObject(json)
+        val name = req.optString("name")
+        if (name.isEmpty()) {
+            return JSONObject().put("ok", false).put("message", "缺少 name").toString()
+        }
+        val edited = database?.memEdit(
+            name,
+            req.optString("old_string"),
+            req.optString("new_string"),
+        ) ?: false
+        return if (edited) {
+            JSONObject().put("ok", true).put("message", "已更新记忆 $name").toString()
+        } else {
+            JSONObject()
+                .put("ok", false)
+                .put("message", "记忆 $name 不存在或未找到目标片段")
+                .toString()
+        }
+    }
+
+    /** 删除记忆。 */
+    fun memDelete(name: String): String {
+        val deleted = database?.memDelete(name) ?: false
+        return if (deleted) {
+            JSONObject().put("ok", true).put("message", "已删除记忆 $name").toString()
+        } else {
+            JSONObject().put("ok", false).put("message", "记忆 $name 不存在").toString()
+        }
+    }
+
+    /** 全局统计（任务 17）：供 Dart 统计面板展示。 */
+    fun stats(): String = database?.statsJson() ?: "{}"
 }

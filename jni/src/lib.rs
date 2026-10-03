@@ -9,6 +9,7 @@
 //! `onEvent(json: String)`。
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -20,7 +21,9 @@ use serde_json::Value;
 use yaya_core::agent::executor::{Action, ActionExecutor};
 use yaya_core::agent::local_parse;
 use yaya_core::agent::mcp::{McpClient, McpTool};
+use yaya_core::agent::memory::{MemoryMeta, MemoryStore};
 use yaya_core::agent::model::{GenerateRequest, ModelBackend, ModelOutput};
+use yaya_core::agent::permission::{ApprovalRequest, Approver, RunMode};
 use yaya_core::agent::router::{Backend, RouteHints};
 use yaya_core::agent::{run_loop, AgentCore, Event, RunConfig};
 
@@ -212,11 +215,139 @@ impl ModelBackend for LocalBackend {
             on_token(&text)?;
         }
         let tool_calls = local_parse::extract_tool_calls(&text);
-        Ok(ModelOutput { text, tool_calls })
+        Ok(ModelOutput {
+            text,
+            tool_calls,
+            usage: None,
+        })
     }
 
     fn backend(&self) -> Backend {
         Backend::Jni
+    }
+}
+
+/// 授权确认（经 Kotlin `requestApproval` 弹窗等待用户选择）。
+/// 回调失败或解析失败一律按拒绝处理，绝不静默放行。
+struct JniApprover {
+    host: JniHost,
+}
+
+impl Approver for JniApprover {
+    fn approve(&mut self, request: &ApprovalRequest) -> bool {
+        let payload = match serde_json::to_string(request) {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        match self.host.call_str("requestApproval", &payload) {
+            Ok(out) => serde_json::from_str::<Value>(&out)
+                .ok()
+                .and_then(|v| v.get("allow").and_then(|b| b.as_bool()))
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+}
+
+/// 自动记忆存储（经 Kotlin `AgentDatabase` 的 `memories` 表）。
+/// 所有回调失败均显式报错，绝不伪装成成功。
+struct JniMemoryStore {
+    host: JniHost,
+}
+
+impl MemoryStore for JniMemoryStore {
+    fn list(&mut self) -> Result<Vec<MemoryMeta>, String> {
+        let out = self.host.call_str0("memList")?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("记忆列表解析失败: {e}"))?;
+        let items = v
+            .get("items")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(items
+            .iter()
+            .filter_map(|it| {
+                let name = it.get("name")?.as_str()?.to_string();
+                let description = it
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(MemoryMeta { name, description })
+            })
+            .collect())
+    }
+
+    fn read(&mut self, name: &str) -> Result<String, String> {
+        let out = self.host.call_str("memRead", name)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("记忆读取解析失败: {e}"))?;
+        if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            return Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("读取失败")
+                .to_string());
+        }
+        Ok(v.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string())
+    }
+
+    fn save(&mut self, name: &str, description: &str, content: &str) -> Result<(), String> {
+        let payload = serde_json::to_string(&serde_json::json!({
+            "name": name,
+            "description": description,
+            "content": content,
+        }))
+        .map_err(|e| format!("记忆保存参数序列化失败: {e}"))?;
+        let out = self.host.call_str("memSave", &payload)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("记忆保存解析失败: {e}"))?;
+        if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("保存失败")
+                .to_string())
+        }
+    }
+
+    fn edit(&mut self, name: &str, old_string: &str, new_string: &str) -> Result<(), String> {
+        let payload = serde_json::to_string(&serde_json::json!({
+            "name": name,
+            "old_string": old_string,
+            "new_string": new_string,
+        }))
+        .map_err(|e| format!("记忆编辑参数序列化失败: {e}"))?;
+        let out = self.host.call_str("memEdit", &payload)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("记忆编辑解析失败: {e}"))?;
+        if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("编辑失败")
+                .to_string())
+        }
+    }
+
+    fn delete(&mut self, name: &str) -> Result<(), String> {
+        let out = self.host.call_str("memDelete", name)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("记忆删除解析失败: {e}"))?;
+        if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("删除失败")
+                .to_string())
+        }
     }
 }
 
@@ -365,6 +496,17 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
 
         let mut core = AgentCore::new(Box::new(jhost.clone()));
 
+        // 授权确认经平台弹窗（BUILD 模式下的不可逆工具会走到这里）。
+        core.register_approver(Box::new(JniApprover {
+            host: jhost.clone(),
+        }));
+        // 自动记忆（SQLite memories 表）；未注册时记忆工具不暴露。
+        core.register_memory_store(Box::new(JniMemoryStore {
+            host: jhost.clone(),
+        }));
+        // 技能目录：App 私有目录 filesDir/skills（Kotlin 保证存在）。
+        let skills_dir = jhost.call_str0("skillsDir").unwrap_or_default();
+
         if local_available && !model_path.is_empty() {
             core.register_backend(Box::new(LocalBackend {
                 host: jhost.clone(),
@@ -394,9 +536,33 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
             ..Default::default()
         };
 
+        let mode = match config.get("mode").and_then(|v| v.as_str()) {
+            Some("plan") => RunMode::Plan,
+            Some("auto") => RunMode::Auto,
+            _ => RunMode::Build,
+        };
+
         let cfg = RunConfig {
             model: model.map(|s| s.to_string()),
             max_steps,
+            mode,
+            skills_dir: if skills_dir.is_empty() {
+                None
+            } else {
+                Some(skills_dir)
+            },
+            mcp_tool_allowlist: config
+                .get("mcpToolAllowlist")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                        .collect::<HashSet<_>>()
+                }),
+            capabilities: yaya_core::agent::capability::Capabilities::from_config(
+                config.get("capabilities"),
+            ),
+            canary: config.get("canary").and_then(|v| v.as_bool()).unwrap_or(false),
             ..Default::default()
         };
 
