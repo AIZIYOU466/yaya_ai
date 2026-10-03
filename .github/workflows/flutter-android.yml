@@ -70,6 +70,9 @@ jobs:
             echo "ANDROID_KEYSTORE_B64 未配置，使用 debug 签名"
           fi
 
+      - name: Analyze Dart code
+        run: flutter analyze
+
       - name: Build APK (release)
         run: flutter build apk --release
 
