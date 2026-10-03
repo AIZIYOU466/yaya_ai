@@ -71,7 +71,9 @@ jobs:
           fi
 
       - name: Analyze Dart code
-        run: flutter analyze
+        run: |
+          flutter analyze > /tmp/analyze.log 2>&1 || exit 1
+          tail -5 /tmp/analyze.log
 
       - name: Build APK (release)
         run: flutter build apk --release
@@ -81,3 +83,11 @@ jobs:
         with:
           name: yayaai-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+
+      - name: Upload analyze log (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: analyze-log
+          path: /tmp/analyze.log
+          if-no-files-found: ignore
