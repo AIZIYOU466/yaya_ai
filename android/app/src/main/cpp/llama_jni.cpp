@@ -14,20 +14,20 @@
 // STUB 构建：默认路径。Kotlin 侧 ModelBridge.isStub() 会读到 true，
 // Rust Core 的路由（core/src/agent/router.rs）据此避开端侧，绝不伪装成真实推理结果。
 
-JNIEXPORT jboolean JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_yaya_ai_ModelBridge_nativeIsStub(JNIEnv*, jobject) {
     LOGW("STUB: nativeIsStub=true（llama.cpp 未编译，推理不可用）");
     return JNI_TRUE;
 }
 
-JNIEXPORT jboolean JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_yaya_ai_ModelBridge_nativeLoadModel(
     JNIEnv* env, jobject thiz, jstring modelPath) {
     LOGW("STUB: nativeLoadModel 拒绝执行（llama.cpp 未编译）");
     return JNI_FALSE;
 }
 
-JNIEXPORT jboolean JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_yaya_ai_ModelBridge_nativeGenerate(
     JNIEnv* env, jobject thiz, jstring modelPath, jstring prompt,
     jobject callback) {
@@ -44,7 +44,7 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
     return JNI_FALSE;
 }
 
-JNIEXPORT void JNICALL
+extern "C" JNIEXPORT void JNICALL
 Java_com_yaya_ai_ModelBridge_nativeCancel(JNIEnv*, jobject) {
     LOGI("STUB: nativeCancel");
 }
@@ -63,12 +63,12 @@ static llama_sampler* g_sampler = nullptr;
 static std::atomic<bool> g_cancelled{false};
 static bool g_backend_inited = false;
 
-JNIEXPORT jboolean JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_yaya_ai_ModelBridge_nativeIsStub(JNIEnv*, jobject) {
     return JNI_FALSE;
 }
 
-JNIEXPORT jboolean JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_yaya_ai_ModelBridge_nativeLoadModel(
     JNIEnv* env, jobject thiz, jstring modelPath) {
 
@@ -97,7 +97,7 @@ Java_com_yaya_ai_ModelBridge_nativeLoadModel(
     return JNI_TRUE;
 }
 
-JNIEXPORT jboolean JNICALL
+extern "C" JNIEXPORT jboolean JNICALL
 Java_com_yaya_ai_ModelBridge_nativeGenerate(
     JNIEnv* env, jobject thiz, jstring modelPath, jstring prompt,
     jobject callback) {
@@ -196,7 +196,7 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
     return JNI_TRUE;
 }
 
-JNIEXPORT void JNICALL
+extern "C" JNIEXPORT void JNICALL
 Java_com_yaya_ai_ModelBridge_nativeCancel(JNIEnv*, jobject) {
     g_cancelled.store(true);
 }
