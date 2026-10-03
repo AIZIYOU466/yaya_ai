@@ -29,7 +29,8 @@ android/key.properties
 /target/
 
 # cargo-ndk 产物与 llama.cpp 源码
-android/app/src/main/jniLibs/
+# Rust 交叉编译产物（scripts/build-android.sh 输出；手动打包的 proot 二进制不忽略）
+android/app/src/main/jniLibs/*/libyaya_core_jni.so
 android/app/src/main/cpp/llama_cpp/
 
 # Logs
