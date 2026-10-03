@@ -43,6 +43,21 @@ android {
         }
     }
 
+    signingConfigs {
+        release {
+            def kf = file("yaya-release.keystore")
+            def storePass = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            def alias = System.getenv("ANDROID_KEY_ALIAS") ?: "yaya"
+            def keyPass = System.getenv("ANDROID_KEY_PASSWORD")
+            if (kf.exists() && storePass != null && keyPass != null) {
+                storeFile kf
+                storePassword storePass
+                keyAlias alias
+                keyPassword keyPass
+            }
+        }
+    }
+
     buildTypes {
         release {
             // CI 注入 keystore（Secret ANDROID_KEYSTORE_B64 还原）时用正式签名，可覆盖安装；
@@ -56,21 +71,6 @@ android {
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
-        }
-    }
-
-    signingConfigs {
-        release {
-            def kf = file("yaya-release.keystore")
-            def storePass = System.getenv("ANDROID_KEYSTORE_PASSWORD")
-            def alias = System.getenv("ANDROID_KEY_ALIAS") ?: "yaya"
-            def keyPass = System.getenv("ANDROID_KEY_PASSWORD")
-            if (kf.exists() && storePass != null && keyPass != null) {
-                storeFile kf
-                storePassword storePass
-                keyAlias alias
-                keyPassword keyPass
-            }
         }
     }
 }
