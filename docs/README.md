@@ -78,6 +78,15 @@ description: 审查代码改动
 
 模型会自动读取记忆清单（description），需要正文时调用 `memory_read`；你可以在对话中直接要求 Agent「记住……」，它会调用 `memory_save`。
 
+### 工作区
+
+工作区是 App 私有目录下的 `workspace/`（右上角文件夹按钮可查看根路径与顶层文件列表）。Agent 可以直接在其中创建、读写、编辑、删除文件来开发软件：
+
+- 告诉它「在 workspace 里创建一个 Flutter 项目」「写一个 `main.py` 并运行它」
+- 文件工具：`file_list` / `file_read` / `file_write` / `file_edit` / `file_delete`
+- BUILD 模式下写/编辑/删除需确认；PLAN 模式只读；AUTO 模式免确认
+- 文件读取有 2000 行 / 200KB 窗口，大文件会提示用 `start_line` 分段续读
+
 ### 构建与验证（开发者）
 
 ```bash

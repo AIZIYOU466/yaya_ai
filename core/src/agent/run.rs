@@ -141,6 +141,9 @@ pub fn run_loop(
     if core.memory_store.is_some() {
         tool_specs.extend(crate::agent::memory::specs());
     }
+    if core.file_access.is_some() {
+        tool_specs.extend(crate::agent::workspace::specs());
+    }
     if let Some(client) = core.mcp.as_mut() {
         match client.list_tools() {
             Ok(list) => {
@@ -350,6 +353,7 @@ fn execute_call(
         &mut *core.executor,
         core.mcp.as_deref_mut(),
         core.memory_store.as_mut(),
+        core.file_access.as_mut(),
     )
 }
 

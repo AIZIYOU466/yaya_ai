@@ -20,6 +20,7 @@ pub mod state;
 pub mod subagent;
 pub mod tools;
 pub mod verifier;
+pub mod workspace;
 
 #[cfg(feature = "cloud-http")]
 pub mod cloud;
@@ -37,6 +38,7 @@ pub use model::{
 };
 pub use permission::{ApprovalRequest, Approver, Reversibility, RunMode, Verdict};
 pub use memory::MemoryStore;
+pub use workspace::FileAccess;
 pub use router::{complexity, route, Complexity};
 pub use run::{run_loop, RunConfig};
 pub use state::{TaskMachine, TaskState};
@@ -51,6 +53,8 @@ pub struct AgentCore {
     pub approver: Option<Box<dyn Approver>>,
     /// 自动记忆存储（可选）；未注册时记忆工具不暴露、无清单注入。
     pub memory_store: Option<Box<dyn MemoryStore>>,
+    /// 工作区文件访问（可选）；未注册时文件工具不暴露。
+    pub file_access: Option<Box<dyn FileAccess>>,
     /// 调用方填入的静态路由信号（force / network_ok / latency_sensitive）；
     /// 可用性信号（local_ok / desktop_ok / cloud_ok）由 [`AgentCore::effective_hints`] 依后端注册情况推导。
     pub hints: RouteHints,
@@ -64,6 +68,7 @@ impl AgentCore {
             mcp: None,
             approver: None,
             memory_store: None,
+            file_access: None,
             hints: RouteHints::default(),
         }
     }
@@ -76,6 +81,11 @@ impl AgentCore {
     /// 注册自动记忆存储；未注册时记忆工具不暴露。
     pub fn register_memory_store(&mut self, store: Box<dyn MemoryStore>) {
         self.memory_store = Some(store);
+    }
+
+    /// 注册工作区文件访问；未注册时文件工具不暴露。
+    pub fn register_file_access(&mut self, access: Box<dyn FileAccess>) {
+        self.file_access = Some(access);
     }
 
     /// 注册 MCP 客户端；未调用则工具集仅含内置工具。

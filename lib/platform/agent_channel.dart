@@ -56,6 +56,17 @@ class AgentChannel {
   static Future<String> getStats() async =>
       await _method.invokeMethod<String>('getStats').timeout(_timeout) ?? '{}';
 
+  /// 工作区根路径（App 私有目录 `workspace/`）。
+  static Future<String> workspaceRoot() async =>
+      await _method.invokeMethod<String>('workspaceRoot').timeout(_timeout) ?? '';
+
+  /// 工作区目录列表（`{ok,content}`，条目名每行一个，目录带 `/` 后缀）。
+  static Future<String> workspaceList(String path) async =>
+      await _method
+              .invokeMethod<String>('workspaceList', {'path': path})
+              .timeout(_timeout) ??
+          '{"ok":false}';
+
   /// 端侧本地模型是否可用（非 STUB）。
   static Future<bool> localAvailable() async =>
       await _method.invokeMethod<bool>('localAvailable').timeout(_timeout) ?? false;

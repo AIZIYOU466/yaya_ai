@@ -25,6 +25,7 @@ use yaya_core::agent::memory::{MemoryMeta, MemoryStore};
 use yaya_core::agent::model::{GenerateRequest, ModelBackend, ModelOutput};
 use yaya_core::agent::permission::{ApprovalRequest, Approver, RunMode};
 use yaya_core::agent::router::{Backend, RouteHints};
+use yaya_core::agent::workspace::FileAccess;
 use yaya_core::agent::{run_loop, AgentCore, Event, RunConfig};
 
 /// 单任务取消标志（里程碑一为单任务模型）。
@@ -351,6 +352,97 @@ impl MemoryStore for JniMemoryStore {
     }
 }
 
+/// 工作区文件访问（经 Kotlin `WorkspaceFileAccess`，路径限制在 `filesDir/workspace/` 内）。
+struct JniFileAccess {
+    host: JniHost,
+}
+
+impl FileAccess for JniFileAccess {
+    fn list(&mut self, path: &str) -> Result<String, String> {
+        let out = self.host.call_str("wsList", path)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("工作区列表解析失败: {e}"))?;
+        if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            return Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("列出失败")
+                .to_string());
+        }
+        Ok(v.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string())
+    }
+
+    fn read(&mut self, path: &str) -> Result<String, String> {
+        let out = self.host.call_str("wsRead", path)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("工作区读取解析失败: {e}"))?;
+        if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            return Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("读取失败")
+                .to_string());
+        }
+        Ok(v.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string())
+    }
+
+    fn write(&mut self, path: &str, content: &str, overwrite: bool) -> Result<bool, String> {
+        let payload = serde_json::to_string(&serde_json::json!({
+            "path": path,
+            "content": content,
+            "overwrite": overwrite,
+        }))
+        .map_err(|e| format!("写入参数序列化失败: {e}"))?;
+        let out = self.host.call_str("wsWrite", &payload)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("写入结果解析失败: {e}"))?;
+        if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            return Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("写入失败")
+                .to_string());
+        }
+        Ok(v.get("created").and_then(|b| b.as_bool()).unwrap_or(false))
+    }
+
+    fn edit(&mut self, path: &str, old_string: &str, new_string: &str) -> Result<(), String> {
+        let payload = serde_json::to_string(&serde_json::json!({
+            "path": path,
+            "old_string": old_string,
+            "new_string": new_string,
+        }))
+        .map_err(|e| format!("编辑参数序列化失败: {e}"))?;
+        let out = self.host.call_str("wsEdit", &payload)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("编辑结果解析失败: {e}"))?;
+        if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("编辑失败")
+                .to_string())
+        }
+    }
+
+    fn delete(&mut self, path: &str) -> Result<(), String> {
+        let out = self.host.call_str("wsDelete", path)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("删除结果解析失败: {e}"))?;
+        if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            Ok(())
+        } else {
+            Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("删除失败")
+                .to_string())
+        }
+    }
+}
+
 /// MCP 客户端（经 Kotlin `McpProcessManager` 管理服务器进程与 JSON-RPC）。
 struct JniMcp {
     host: JniHost,
@@ -502,6 +594,10 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
         }));
         // 自动记忆（SQLite memories 表）；未注册时记忆工具不暴露。
         core.register_memory_store(Box::new(JniMemoryStore {
+            host: jhost.clone(),
+        }));
+        // 工作区文件访问（filesDir/workspace/，路径穿越校验在 Kotlin 侧）。
+        core.register_file_access(Box::new(JniFileAccess {
             host: jhost.clone(),
         }));
         // 技能目录：App 私有目录 filesDir/skills（Kotlin 保证存在）。

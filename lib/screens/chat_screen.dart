@@ -369,6 +369,82 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     );
   }
 
+  /// 全局统计弹窗（任务 17）。
+  Future<void> _showStats() async {
+    final raw = await AgentChannel.getStats();
+    final Map<String, dynamic> stats;
+    try {
+      stats = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      return;
+    }
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: Text(L10n.t(ref.read(languageProvider), 'stats_title')),
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: stats.entries
+                  .map(
+                    (e) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text(
+                        '${e.key}: ${e.value}',
+                        style: const TextStyle(fontSize: 14),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 工作区浏览弹窗（任务 21）：显示根路径与顶层文件列表。
+  Future<void> _showWorkspace() async {
+    final root = await AgentChannel.workspaceRoot();
+    final raw = await AgentChannel.workspaceList('');
+    final Map<String, dynamic> data;
+    try {
+      data = jsonDecode(raw) as Map<String, dynamic>;
+    } catch (_) {
+      data = const {};
+    }
+    if (!mounted) return;
+    final ok = data['ok'] as bool? ?? false;
+    final content = data['content'] as String? ?? data['message'] as String? ?? '';
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('工作区'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(root, style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
+              const SizedBox(height: 12),
+              if (!ok)
+                Text(content, style: TextStyle(color: Theme.of(ctx).colorScheme.error))
+              else if (content.isEmpty)
+                const Text('（空工作区：让 AI 建文件，或在对话中说「在 workspace 里创建…」）')
+              else
+                Text(content, style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _stop() async {
     await AgentChannel.stopAgent();
     setState(() {
@@ -398,6 +474,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
             icon: const Icon(Icons.analytics_outlined),
             tooltip: 'Stats',
             onPressed: _showStats,
+          ),
+          IconButton(
+            icon: const Icon(Icons.folder_outlined),
+            tooltip: 'Workspace',
+            onPressed: _showWorkspace,
           ),
           IconButton(
             icon: const Icon(Icons.translate),

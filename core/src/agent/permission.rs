@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::memory;
 use super::subagent;
 use super::tools;
+use super::workspace;
 
 /// 工具的撤销成本等级：决定 BUILD 模式下是否需要执行前确认。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +49,11 @@ pub fn reversibility_of(tool: &str) -> Reversibility {
         | memory::TOOL_MEMORY_DELETE => Reversibility::Reversible,
         // 子代理：编排操作本身可撤销（其内部工具各自受策略约束）。
         subagent::TOOL_SUBAGENT => Reversibility::Reversible,
+        // 工作区文件：读/列只读放行；写/编辑/删除不可逆需确认。
+        workspace::TOOL_FILE_LIST | workspace::TOOL_FILE_READ => Reversibility::Reversible,
+        workspace::TOOL_FILE_WRITE
+        | workspace::TOOL_FILE_EDIT
+        | workspace::TOOL_FILE_DELETE => Reversibility::Irreversible,
         _ => Reversibility::Irreversible,
     }
 }
@@ -57,6 +63,7 @@ pub fn is_write(tool: &str) -> bool {
     match tool {
         tools::TOOL_NOTIFY | tools::TOOL_CLIPBOARD_READ => false,
         memory::TOOL_MEMORY_LIST | memory::TOOL_MEMORY_READ => false,
+        workspace::TOOL_FILE_LIST | workspace::TOOL_FILE_READ => false,
         _ => true,
     }
 }

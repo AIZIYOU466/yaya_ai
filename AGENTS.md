@@ -57,6 +57,7 @@
   - 内置工具：`terminal_exec` / `clipboard_read` / `clipboard_write` / `notify`（`tools.rs`）；设备操控类工具已移除
   - `core/src/agent/tools.rs` / `openai.rs` / `events.rs` / `cloud.rs` / `mcp.rs`
   - `core/src/agent/capability.rs` / `canary.rs` / `verifier.rs` —— 能力探测 / 金丝雀 / 环境验证
+  - `core/src/agent/workspace.rs` —— 工作区文件系统（`FileAccess` trait + 5 个文件工具）
 - **Android 经 JNI 共享 core**：`jni/` crate 编译为 `libyaya_core_jni.so`；平台差异经 `ActionExecutor` / `ModelBackend` / `McpClient` 三个 trait 由 Kotlin 实现注入。
 - **禁止**在 Kotlin/Dart 侧重复实现循环、路由、工具层或 OpenAI 解析（防逻辑漂移）。
 
@@ -132,6 +133,13 @@
 - **能力探测**：能力由 `RunConfig.capabilities`（config `capabilities` 对象）声明；core 据此钳制 `max_tokens` 不超过上下文窗口一半，推导 `max_messages` 压缩阈值（窗口越小越激进）。真实 HTTP 探测由平台/Kotlin 完成（core 只做能力模型的解析与应用）。
 - **金丝雀**：`RunConfig.canary: true` 时在任务开始前运行一组已知答案的探测题（默认：简单算术），异常经 `Event::Notice` 上报（不阻断任务，成本可忽略）。
 - **环境验证**（`verifier.rs`）：对可验证工具（如 `clipboard_write`）执行后自动读回比较；验证失败回填原因给模型并标记为失败；其余工具视执行成功为完成（命令已返回输出、通知已发送）。不假设工具成功（客观信号优先）。
+
+## R19 工作区文件系统
+
+- 工作区根：`filesDir/workspace/`（Kotlin `WorkspaceFileAccess`），工具只接受**相对路径**；所有路径先 `normalize` 再校验必须落在工作区内（防目录穿越），绝对路径与越界路径一律拒绝。
+- 工具：`file_list` / `file_read` / `file_write` / `file_edit` / `file_delete`（唯一实现在 `core/src/agent/workspace.rs`）；读取有 2000 行 / 200KB 窗口，超限截断并用 `start_line` 分段续读。
+- 权限：读/列只读放行（PLAN 可用）；写/编辑/删除不可逆（BUILD 需确认，见 R12）。
+- **禁止**在 Kotlin/Dart 侧重复实现工具语义与参数校验（只做平台文件操作与路径安全）。
 
 ## 构建与验证
 

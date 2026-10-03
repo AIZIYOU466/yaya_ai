@@ -29,6 +29,12 @@ class AgentHost(
     } catch (_: Exception) {
         null
     }
+    // 工作区文件访问（AGENTS.md R19）：初始化失败不阻断 Agent。
+    private val workspace: WorkspaceFileAccess? = try {
+        WorkspaceFileAccess(context)
+    } catch (_: Exception) {
+        null
+    }
     companion object {
         private const val TAG = "AgentHost"
         private const val AGENT_CHANNEL_ID = "yaya_agent"
@@ -446,4 +452,18 @@ class AgentHost(
 
     /** 全局统计（任务 17）：供 Dart 统计面板展示。 */
     fun stats(): String = database?.statsJson() ?: "{}"
+
+    // ── 工作区文件（JNI 回调，AGENTS.md R19） ──────────────────
+
+    fun wsList(path: String): String = workspace?.list(path) ?: errJson("工作区不可用")
+    fun wsRead(path: String): String = workspace?.read(path) ?: errJson("工作区不可用")
+    fun wsWrite(json: String): String = workspace?.write(json) ?: errJson("工作区不可用")
+    fun wsEdit(json: String): String = workspace?.edit(json) ?: errJson("工作区不可用")
+    fun wsDelete(path: String): String = workspace?.delete(path) ?: errJson("工作区不可用")
+
+    /** 工作区根路径（UI 展示用）。 */
+    fun workspaceRoot(): String = workspace?.rootPath() ?: ""
+
+    private fun errJson(msg: String): String =
+        JSONObject().put("ok", false).put("message", msg).toString()
 }

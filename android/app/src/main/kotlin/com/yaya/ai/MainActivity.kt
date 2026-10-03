@@ -101,6 +101,11 @@ class MainActivity : FlutterActivity() {
                         result.success(agentHost.checkpointsJson(sid))
                     }
                     "getStats" -> result.success(agentHost.stats())
+                    "workspaceRoot" -> result.success(agentHost.workspaceRoot())
+                    "workspaceList" -> {
+                        val path = call.argument<String>("path") ?: ""
+                        result.success(agentHost.wsList(path))
+                    }
                     "localAvailable" -> result.success(agentHost.localAvailable())
                     "networkAvailable" -> result.success(isNetworkAvailable())
                     "rootfsInstalled" -> result.success(RootfsInstaller.isInstalledCurrent(this))

@@ -119,6 +119,12 @@
   - 备注：决策链随对话历史一并持久化，重启后可复盘；趋势图表留待后续
   - 验收：能追溯任意任务的决策链（已达成）
 
+- [x] **21. 工作区文件系统**（新增）
+  - 参考：AiCode `feature/workspace/` + `FileTools.kt`
+  - 实现：`core/src/agent/workspace.rs`（`FileAccess` trait + 5 工具：list/read/write/edit/delete + 2000 行/200KB 窗口 + start_line 分段）；Kotlin `WorkspaceFileAccess.kt`（`filesDir/workspace/` + 路径穿越校验）；JNI `JniFileAccess`；Dart 工作区浏览弹窗
+  - 权限：list/read 只读放行（PLAN 可用）；write/edit/delete 不可逆（BUILD 需确认）
+  - 验收：AI 可直接在工作区建文件/读写/编辑/删除、开发软件（已达成，core 88 测试）
+
 ### Phase 2D：文化与治理（P3）
 
 - [x] **19. 决策原则文档深化**
@@ -174,3 +180,4 @@
 - **2026-10-03**：Batch 4 落地 —— 任务 11/12（轻量 i18n + 用户文档）。Dart 侧无容器验证；任务 11 覆盖聊天页，其余页面留待增量。
 - **2026-10-03**：Batch 5 落地 —— 任务 13/14/15/16/19/20（能力探测 + 金丝雀 + 注入防御 + MCP 白名单 + 决策原则深化 + 环境验证 oracle）。core 85 测试全过。
 - **2026-10-03**：Batch 6 落地 —— 任务 17/18（评估面板 + 决策复盘）。Kotlin 统计聚合 + usage/policy 事件入库 + Dart 统计弹窗 + policy 消息展示。**ROADMAP 20 个任务全部完成。**
+- **2026-10-03**：Batch 7 落地 —— 任务 21（工作区文件系统，新增）。core 文件工具 + Kotlin 路径安全访问 + JNI + Dart 浏览入口。core 88 测试全过。
