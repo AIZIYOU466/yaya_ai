@@ -240,16 +240,16 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     final colors = Theme.of(context).colorScheme;
     return MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
       codeblockDecoration: BoxDecoration(
-        color: colors.surfaceContainerHighest.withValues(alpha: 0.4),
+        color: colors.surfaceContainerHighest.withOpacity(0.4),
         borderRadius: BorderRadius.circular(8),
       ),
-      codeStyle: const TextStyle(
+      code: const TextStyle(
         fontFamily: 'monospace',
         fontSize: 13,
       ),
       blockSpacing: 8,
       blockquoteDecoration: BoxDecoration(
-        color: colors.surfaceContainerHighest.withValues(alpha: 0.3),
+        color: colors.surfaceContainerHighest.withOpacity(0.3),
         borderRadius: BorderRadius.circular(4),
       ),
     );
@@ -265,7 +265,7 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           constraints: const BoxConstraints(maxWidth: 560),
           decoration: BoxDecoration(
-            color: colors.surfaceContainerHigh.withValues(alpha: 0.5),
+            color: colors.surfaceContainerHigh.withOpacity(0.5),
             borderRadius: BorderRadius.circular(12),
           ),
           child: MarkdownBody(
