@@ -6,7 +6,6 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.result.contract.ActivityResultContracts
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -17,24 +16,33 @@ class MainActivity : FlutterActivity() {
     private val AGENT_CHANNEL = "com.yaya.ai/agent"
     private val AGENT_EVENTS = "com.yaya.ai/agent/events"
     private val MODEL_CHANNEL = "com.yaya.ai/model"
+    private val REQUEST_NOTIFICATION_PERMISSION = 1001
 
     private lateinit var agentHost: AgentHost
     private var agentEventSink: EventChannel.EventSink? = null
     private var agentTaskThread: Thread? = null
 
-    // Android 13+ notify 工具需运行时权限：启动时请求一次，用户拒绝则工具显式报错。
-    private val notificationPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { }
-
+    // Android 13+ notify 工具需运行时权限：首次启动请求一次，用户拒绝则工具显式报错。
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
-            notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            requestPermissions(
+                arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_NOTIFICATION_PERMISSION,
+            )
         }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // 拒绝时 AgentHost.sendNotification 会在调用方显式报错，无需在此处理。
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
