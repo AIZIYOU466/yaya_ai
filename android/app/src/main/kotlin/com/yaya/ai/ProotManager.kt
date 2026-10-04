@@ -1,6 +1,7 @@
 package com.yaya.ai
 
 import android.content.Context
+import android.os.Build
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -8,6 +9,19 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 object ProotManager {
+
+    /** API 26+ 直接 isAlive；更低版本用 exitValue() 抛异常判断存活。 */
+    private fun Process?.isRunning(): Boolean = when {
+        this == null -> false
+        Build.VERSION.SDK_INT >= 26 -> isAlive
+        else -> try {
+            exitValue()
+            false
+        } catch (_: IllegalThreadStateException) {
+            true
+        }
+    }
+
     const val EXIT_MARKER = "<YAYA_EXIT_"
 
     private var process: Process? = null
@@ -20,7 +34,7 @@ object ProotManager {
     var lastError: String? = null
 
     fun start(context: Context): Boolean {
-        if (process?.isAlive == true) return true
+        if (process.isRunning()) return true
         val rootfs = RootfsInstaller.rootfsDir(context, RootfsInstaller.currentId(context))
         if (!rootfs.exists()) {
             lastError = "未安装 Linux 环境（请在终端页下载安装 Alpine rootfs）"
@@ -100,7 +114,7 @@ object ProotManager {
      */
     @Synchronized
     fun runCommandBlocking(context: Context, command: String, timeoutMs: Long): String {
-        if (process?.isAlive != true) {
+        if (!process.isRunning()) {
             if (!start(context)) {
                 throw IllegalStateException(lastError ?: "终端容器启动失败")
             }
