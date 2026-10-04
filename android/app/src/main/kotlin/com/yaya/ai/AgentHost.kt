@@ -344,6 +344,22 @@ class AgentHost(
     /** 最近会话 JSON（供 Dart 重启恢复）；无会话返回 null。 */
     fun recentSessionJson(): String? = database?.recentSessionJson()
 
+    /** 所有会话列表 JSON（多会话管理，任务 24）。 */
+    fun sessionsJson(): String = database?.sessionsJson() ?: "[]"
+
+    /** 重命名会话。 */
+    fun renameSession(id: String, title: String) {
+        database?.renameSession(id, title)
+    }
+
+    /** 删除会话及其消息与检查点。 */
+    fun deleteSession(id: String) {
+        database?.deleteSession(id)
+    }
+
+    /** 指定会话 JSON（含消息）；不存在返回 null。 */
+    fun sessionJson(id: String): String? = database?.sessionJson(id)
+
     /** 会话检查点列表 JSON：`[{messages:[...]}]`，新 → 旧。 */
     fun checkpointsJson(sessionId: String): String {
         val arr = JSONArray()

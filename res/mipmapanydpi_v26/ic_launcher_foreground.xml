@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 背景层将在单独的文件中定义，这里留空由系统或背景文件决定 -->
+    <foreground
+        android:targetDensity="mdpi"
+        android:fillColor="#00E5A0">
+        <svg android:width="108dp" android:height="108dp" viewBox="0 0 100 100">
+            <!-- 三个任务节点（深灰） -->
+            <circle cx="30" cy="30" r="8" fill="#2A2E36"/>
+            <circle cx="70" cy="30" r="8" fill="#2A2E36"/>
+            <circle cx="50" cy="70" r="8" fill="#2A2E36"/>
+            
+            <!-- 连接线 -->
+            <line x1="30" y1="30" x2="50" y2="70" stroke="#2A2E36" stroke-width="1.5"/>
+            <line x1="70" y1="30" x2="50" y2="70" stroke="#2A2E36" stroke-width="1.5"/>
+            
+            <!-- 底部验证节点（用强调色填充，象征任务执行中/已就绪） -->
+            <circle cx="50" cy="70" r="8" fill="#00E5A0"/>
+        </svg>
+    </foreground>
+</adaptive-icon>

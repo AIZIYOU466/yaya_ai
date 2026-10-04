@@ -116,6 +116,43 @@ class AgentDatabase private constructor(context: Context) :
         )
     }
 
+    /** 所有会话列表 `[{id,title,updatedAt,messageCount}]`，按 updated_at 倒序（多会话管理，任务 24）。 */
+    fun sessionsJson(): String {
+        val arr = JSONArray()
+        val db = readableDatabase
+        db.query("sessions", null, null, null, null, null, "updated_at DESC").use { c ->
+            while (c.moveToNext()) {
+                val sid = c.getString(c.getColumnIndexOrThrow("id"))
+                val count = db.query(
+                    "messages", null,
+                    "session_id=? AND role NOT IN ('usage','policy','system')",
+                    arrayOf(sid), null, null, null,
+                ).use { mc -> mc.count }
+                arr.put(
+                    JSONObject().apply {
+                        put("id", sid)
+                        put("title", c.getString(c.getColumnIndexOrThrow("title")))
+                        put("updatedAt", c.getLong(c.getColumnIndexOrThrow("updated_at")))
+                        put("messageCount", count)
+                    }
+                )
+            }
+        }
+        return arr.toString()
+    }
+
+    fun renameSession(id: String, title: String) {
+        val values = ContentValues().apply { put("title", title) }
+        writableDatabase.update("sessions", values, "id=?", arrayOf(id))
+    }
+
+    /** 删除会话及其全部消息与检查点。 */
+    fun deleteSession(id: String) {
+        writableDatabase.delete("messages", "session_id=?", arrayOf(id))
+        writableDatabase.delete("checkpoints", "session_id=?", arrayOf(id))
+        writableDatabase.delete("sessions", "id=?", arrayOf(id))
+    }
+
     // ── messages ─────────────────────────────────────────────
 
     fun insertMessage(sessionId: String, role: String, text: String, ok: Boolean) {
@@ -165,6 +202,20 @@ class AgentDatabase private constructor(context: Context) :
                 put("sessionId", sid)
                 put("title", title)
                 put("messages", JSONArray(messagesJson(sid)))
+            }.toString()
+        }
+    }
+
+    /** 指定会话 JSON（含 sessionId/title/messages）；不存在返回 null。 */
+    fun sessionJson(id: String): String? {
+        val db = readableDatabase
+        db.query("sessions", null, "id=?", arrayOf(id), null, null, null).use { c ->
+            if (!c.moveToFirst()) return null
+            val title = c.getString(c.getColumnIndexOrThrow("title"))
+            return JSONObject().apply {
+                put("sessionId", id)
+                put("title", title)
+                put("messages", JSONArray(messagesJson(id)))
             }.toString()
         }
     }

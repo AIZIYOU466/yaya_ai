@@ -23,19 +23,23 @@ Rust Agent Core（crate `yaya-core`，唯一规范源）
   ├─ openai.rs    OpenAI 兼容协议（含流式 tool_calls 解析）
   ├─ cloud.rs     云端后端（reqwest + rustls，feature `cloud-http`）
   ├─ mcp.rs       MCP 工具接入（命名空间 + McpClient trait）
-  └─ observer.rs / executor.rs / model.rs   观察/动作/模型三个平台 trait
+  └─ executor.rs / model.rs   动作/模型两个平台 trait
 ```
 
 **归属原则**：循环机是编排者，属 Core（Rust，唯一实现）；Android 经 JNI 共享；
-平台差异由 `ScreenObserver` / `ActionExecutor` / `ModelBackend` / `McpClient` 四个 trait 注入。
+平台差异由 `ActionExecutor` / `ModelBackend` / `McpClient` 三个 trait 注入。
 Kotlin/Dart 侧**不得**重复实现循环、路由或工具层。
 
 ## 功能
 
 - **AI Agent 闭环**：ReAct 多步循环 + OpenAI function-calling（含流式 `tool_calls`），
   支持最大步数与中断取消。
-- **设备控制工具**：`observe_screen` / `tap_node` / `input_text` / `scroll_node` /
-  `swipe` / `system_action` / `launch_app`。
+- **文件浏览与代码编辑器**：缩进树形目录浏览工作区（长按新建/重命名/删除）；内置等宽
+  编辑器（撤销/重做/保存、快捷符号栏、未保存退出确认），Markdown 渲染预览与代码语法
+  高亮预览（纯 Dart 零依赖）。
+- **Git 版本管理**：状态/分支/提交三标签页，可视化管理工作区版本（暂存/取消暂存/全部回退、
+  提交、分支切换/新建/删除、提交历史、文件 diff），经 proot 容器执行 git
+  （需容器安装 git，如 Alpine `apk add git`；工作区已挂载进容器 `/workspace`）。
 - **终端工具**：`terminal_exec`（proot Debian 容器，同步取回输出，带超时）。
 - **端侧推理**：llama.cpp JNI（默认 STUB，需显式开启）。
 - **MCP 工具**：stdio 服务器的工具并入统一工具层（`mcp__<server>__<tool>`），

@@ -7,6 +7,7 @@
 
 - **阶段 1**：向 AiCode 靠齐 —— 补齐 AiCode 已有的核心 Agent 能力（12 任务）
 - **阶段 2**：超越 AiCode —— 落实顶尖 Agent 判据（8 任务）
+- **阶段 3**：从聊天壳到 IDE 工作台 —— 补齐 IDE 型产品形态，并让端侧推理与多模态从「代码就绪」变为「真机可用」（16 任务）
 
 ---
 
@@ -137,6 +138,124 @@
   - 当前覆盖：`clipboard_write` 读回验证；其余工具 `NoCheck`（通知、命令输出视为已执行）
   - 验收：Agent 不假设成功，可验证工具调用有客观验证（已达成，有 core 测试）
 
+## 阶段 3：从聊天壳到 IDE 工作台
+
+阶段 1-2 补齐了 Agent 内核（循环/路由/权限/记忆/技能/子代理/评估/注入防御），
+yaya_ai 已是「内核 + 聊天壳」。阶段 3 的目标是补齐 IDE 型客户端的产品形态，
+并让端侧推理与多模态从「代码就绪」变为「真机可用」，追平 AiCode 的外围能力。
+
+### Phase 3A：核心工作台（P0）
+
+- [x] **22. 文件浏览与代码编辑器**
+  - 参考：AiCode `guide/files.md`
+  - 实现：新建 `lib/screens/files_screen.dart`（缩进树形目录、文件类型图标、长按新建/重命名/删除、按需展开加载）与 `lib/screens/editor_screen.dart`（编辑/预览双模式：等宽 TextField + 快捷符号栏 + 撤销重做 + 未保存退出确认；Markdown 用 MarkdownWidget 渲染，代码用零依赖语法高亮器）；Kotlin `MainActivity` 新增 workspaceRead/workspaceWrite/workspaceDelete 通道（单文件读写走后台线程）；`home_screen` 加「文件」tab
+  - 备注：语法高亮为纯 Dart 实现（`lib/widgets/syntax_highlighter.dart`），预览模式生效；实时编辑高亮留待后续
+  - 验收：用户可在 App 内浏览工作区文件树、点开编辑、保存；编辑器支持主流语言语法高亮（已达成，Dart/Kotlin 未真机验证）
+
+- [x] **23. Git 版本管理 UI**
+  - 参考：AiCode `guide/git.md`
+  - 实现：新建 `lib/screens/git_screen.dart`（状态/分支/提交三标签页；`git status --porcelain -z` 解析 + 分组，暂存/取消暂存/全部回退/提交，分支切换/新建/删除，提交历史 `git log --oneline`，文件 diff 与提交详情底部弹层）；Kotlin `GitHost.kt`（经 `ProotManager.runCommandBlocking` 对容器 `/workspace` 执行 git，参数数组逐词 shell 转义防注入，含 git 可用性/仓库检测）；`ProotManager` 把工作区 `filesDir/workspace` bind 进容器 `/workspace`（与 file 工具同目录，修复 file/terminal 不一致）；文件页 AppBar 加 Git 入口
+  - 前置：容器需装 git（Alpine `apk add git`），Git 页检测到缺 git 时提示
+  - 依赖：任务 22（复用 file 工具工作区语义；diff 为文本展示，未复用编辑器）
+  - 验收：用户可在 App 内可视化管理 Git，不依赖终端敲命令（已达成，Dart/Kotlin 未真机验证）
+
+- [ ] **24. 多会话管理**
+  - 参考：AiCode `guide/chat.md` 侧边栏会话页
+  - 涉及：`lib/screens/chat_screen.dart`（侧边栏会话列表）；`AgentDatabase`（已有 sessions 表，补查询接口）；`AgentChannel`（切换/删除/重命名会话）
+  - 功能：按时间分组、置顶、重命名、删除、切换；侧边栏同时承载会话页与文件页（任务 22）
+  - 依赖：任务 22（侧边栏复用）
+  - 验收：用户可管理多个会话并在其间切换，进程重启后恢复
+
+### Phase 3B：模型与多模态（P0）
+
+- [ ] **25. 多模型提供商**
+  - 参考：AiCode `guide/providers.md`
+  - 涉及：`lib/screens/config_screen.dart`（从单端点改为多提供商列表）；`providers.dart`（提供商模型：类型/Key/BaseURL/模型列表）；Kotlin `AgentHost`（config 下发多提供商）；core `cloud.rs`（按协议适配 OpenAI/Anthropic/Gemini）
+  - 功能：多提供商（OpenAI/Anthropic/Gemini 三协议）、模型拉取与手动添加、能力标签（Image/Tools/上下文长度）、模型选择弹窗
+  - 验收：用户可配置多个模型服务并在对话中切换模型
+
+- [ ] **26. 多模态图片输入与展示**
+  - 参考：AiCode `guide/chat.md` 图片按钮与全屏看图
+  - 涉及：`lib/screens/chat_screen.dart`（图片附件按钮 + 预览卡 + 全屏看大图）；`AgentChannel`（图片 base64 下发）；core `model.rs` 的 `Content::Parts`/`user_with_images`（已就绪，激活即可）
+  - 功能：用户上传相册图片作为附件、AI 回复中的图片可点开全屏、双指缩放
+  - 备注：core 多模态消息层已完整（含序列化测试），本任务只补 UI 与附件下发链路；与「不操控设备」定位兼容（用户主动上传，非自动截屏）
+  - 验收：用户可发图给 AI 并收到带图的回复，图片可全屏查看
+
+### Phase 3C：交互体验（P1）
+
+- [ ] **27. 消息队列**
+  - 参考：AiCode `guide/chat.md` 消息队列
+  - 涉及：`lib/screens/chat_screen.dart`（队列面板 + 排队/跳过/移除）；`AgentChannel`（队列状态）
+  - 功能：AI 忙时输入排队、当前轮结束后自动发送下一条、点停止跳过当前轮、可移除排队项
+  - 验收：AI 工作时可继续输入并排队，不打断当前任务
+
+- [ ] **28. 斜杠命令**
+  - 参考：AiCode `/status`、`/compress`
+  - 涉及：`lib/screens/chat_screen.dart`（输入 `/` 弹命令菜单）；`AgentChannel`（命令处理）
+  - 功能：`/status`（当前会话状态：token/模型/模式）、`/compress`（手动触发上下文压缩）；命令在 AI 忙时排队
+  - 依赖：任务 29（`/compress` 依赖压缩增强）
+  - 验收：输入 `/` 可用斜杠命令
+
+- [ ] **29. 上下文压缩增强**
+  - 现状：`compact_messages` 为简单截断（保留头尾，中间丢弃并插入说明）
+  - 涉及：`core/src/agent/run.rs`（`compact_messages` 升级为摘要压缩：调用模型生成中间摘要替换截断说明）
+  - 功能：超阈值时用模型对中间历史生成摘要，保留上下文连续性而非简单丢弃
+  - 验收：长任务压缩后模型仍能正确引用早期上下文；有 core 测试
+
+- [ ] **30. 用量透明度**
+  - 参考：AiCode `guide/token-stats.md`
+  - 涉及：`lib/screens/chat_screen.dart`（回复气泡下 token 拆分 + 缓存命中率 + 耗时）；`AgentDatabase`（统计明细）
+  - 功能：每条回复显示 prompt/completion token、缓存命中率、本轮耗时；会话与全局累计费用估算
+  - 验收：用户能看到每次回复的成本明细与累计费用
+
+### Phase 3D：端侧与并行（P1）
+
+- [ ] **31. 端侧推理落地**
+  - 现状：链路齐全（`llama_jni.cpp` + `ModelBridge.kt` + JNI `LocalBackend` + 路由 `local_ok`），但默认 STUB，llama.cpp 未编译，状态 UNVERIFIED
+  - 涉及：`android/app/src/main/cpp/llama_cpp/`（放入 llama.cpp 源码）；`scripts/build-android.sh`（`-PenableLlamaCpp=true`）；`lib/screens/config_screen.dart`（模型文件选择/下载 UI）；`AgentHost`（`localAvailable` + `modelPath` 下发）
+  - 功能：真机验证 llama.cpp 全量构建、.gguf 模型文件管理、端侧 function-calling（`local_parse.rs` 的 `<tool_call>` 解析对真实小模型的可靠性验证）
+  - 验收：离线状态下 Agent 可用端侧模型推理与工具调用；路由 `local_ok` 分支真正生效；R4 状态从 UNVERIFIED 改为已验证并登记 llama.cpp tag
+
+- [ ] **32. 子代理真并行与自定义**
+  - 现状：`subagent.rs` 为顺序递归，单线程
+  - 涉及：`core/src/agent/subagent.rs`（多线程并行 + 事件流标记子代理 id）；`core/src/agent/run.rs`（并行调度与结果汇总）；Kotlin `AgentHost`（JNI 多线程回调）；`lib/screens/chat_screen.dart`（子代理状态指示 + 点击进入子会话）
+  - 功能：最多 N 个子代理并行、自定义子代理（模型/工具白名单/专属提示词）、内置 Explore 只读代理、设置内启停管理
+  - 验收：主 Agent 可派发多个并行子代理，主会话不阻塞
+
+### Phase 3E：扩展与成熟度（P2）
+
+- [ ] **33. 终端多标签与辅助按键**
+  - 参考：AiCode `guide/terminal.md`
+  - 涉及：`lib/screens/terminal_screen.dart`（多标签 + 辅助按键栏 + 配色字体光标设置）
+  - 现状：单标签、单命令输入
+  - 功能：多标签管理、辅助按键栏（Ctrl/Esc/Tab/方向键/常用符号）、配色主题、字体大小、光标样式
+  - 验收：终端支持多标签与辅助按键，AI 执行命令的标签也出现在列表
+
+- [ ] **34. 备份与同步**
+  - 参考：AiCode `guide/backup.md`、`guide/sync.md`
+  - 涉及：新建 `lib/screens/backup_screen.dart`；Kotlin `BackupHost.kt`（加密导出/导入配置与工作区）；可选 SFTP/FTP 通道
+  - 功能：加密备份导出导入（配置 + 工作区）、工作区同步
+  - 验收：用户可备份全部数据并在新设备恢复
+
+- [ ] **35. 远程 SSH 后端**
+  - 参考：AiCode `guide/remote-ssh.md`
+  - 涉及：Kotlin `SshHost.kt`（SSH 连接 + 远程命令执行）；`core/src/agent/router.rs`（desktop 分支改为 SSH 语义或新增 SSH 后端）；`lib/screens/config_screen.dart`（SSH 配置入口）
+  - 功能：工作区与容器在远程服务器，AI 命令执行与文件读写经 SSH
+  - 备注：替代 R2 中保留但未实现的 desktop gRPC 分支
+  - 验收：用户可连接远程 SSH 服务器作为执行后端
+
+- [ ] **36. 真机验证与首次发版**
+  - 参考：AGENTS.md R17 发版流程
+  - 涉及：真机回归清单（AI 对话 + 终端容器 + MCP / 端侧模型）三条主线；Git Tag 驱动 CI 构建 Release APK
+  - 验收：真机通过三条主线验证，打 `v1.0.0` Tag 发布首个正式版
+
+### Phase 3F：文档债（P2）
+
+- [ ] **37. 文档同步**
+  - 现状：`README.md` 功能列表仍列设备控制工具（observe_screen/tap_node 等），与 AGENTS.md（已移除）脱节，违反 R15
+  - 涉及：`README.md`（功能列表改为当前实际工具集）；`docs/README.md`（同步）；`PROJECTS.md`（验证命令从 30 项更新为 88 项）
+  - 验收：所有文档与代码现状一致，无过时描述
+
 ---
 
 ## 优先级
@@ -148,6 +267,12 @@
 | **P2** | 完善 | 10, 11, 12 |
 | **P3** | 顶尖的顶尖 | 13, 15, 16, 17, 19 |
 | **P4** | 长期 | 14, 18, 20 |
+| **P0** | 工作台三件套（追平 AiCode 产品形态的基石） | 22, 23, 24 |
+| **P0** | 核心能力接线（多模型 + 多模态） | 25, 26 |
+| **P1** | 交互体验 | 27, 28, 29, 30 |
+| **P1** | 端侧与并行（差异化核心） | 31, 32 |
+| **P2** | 扩展与成熟度 | 33, 34, 35, 36 |
+| **P2** | 文档债 | 37 |
 
 ## 关键依赖
 
@@ -156,6 +281,10 @@
 - 任务 **4**（Token 统计）→ **17**（评估指标）的前置
 - 任务 **5**（原因码）→ **18**（复盘工具）的前置
 - 任务 **13**（能力探测）→ **14**（金丝雀）的前置
+- 任务 **22**（文件编辑器）→ **23**（Git diff 展示）的前置
+- 任务 **22**（侧边栏）→ **24**（多会话列表）的前置
+- 任务 **29**（压缩增强）→ **28**（`/compress` 命令）的前置
+- 任务 **31**（端侧推理）→ R4 状态从 UNVERIFIED 转 VERIFIED 的前置
 
 ## 建议实施节奏
 
@@ -166,8 +295,14 @@
 | **3** | 3-4 周 | 8 → 9 → 10（能力扩展） |
 | **4** | 1-2 周 | 11、12（工程质量） |
 | **5** | 长期 | 13-20（按需推进） |
+| **6** | 2-3 周 | 37（文档债）→ 22 → 23 → 24（工作台三件套） |
+| **7** | 2-3 周 | 25 → 26（多模型 + 多模态接线） |
+| **8** | 2-3 周 | 27 → 29 → 28 → 30（交互体验） |
+| **9** | 3-4 周 | 31 → 32（端侧推理落地 + 子代理并行） |
+| **10** | 长期 | 33、34、35、36（扩展与发版） |
 
-**里程碑**：Batch 1-2 完成后 yaya_ai 「能用了」；Batch 1-4 完成后「能规模化使用」；Batch 5 完成后才叫顶尖。
+**里程碑**：Batch 1-2 完成后 yaya_ai 「能用了」；Batch 1-4 完成后「能规模化使用」；Batch 5 完成后才叫顶尖；
+**Batch 6-7** 完成后「从聊天壳变成 IDE 工作台」；**Batch 8-9** 完成后「核心能力真机可用」；**Batch 10** 完成后「正式发版」。
 
 ---
 
@@ -181,3 +316,4 @@
 - **2026-10-03**：Batch 5 落地 —— 任务 13/14/15/16/19/20（能力探测 + 金丝雀 + 注入防御 + MCP 白名单 + 决策原则深化 + 环境验证 oracle）。core 85 测试全过。
 - **2026-10-03**：Batch 6 落地 —— 任务 17/18（评估面板 + 决策复盘）。Kotlin 统计聚合 + usage/policy 事件入库 + Dart 统计弹窗 + policy 消息展示。**ROADMAP 20 个任务全部完成。**
 - **2026-10-03**：Batch 7 落地 —— 任务 21（工作区文件系统，新增）。core 文件工具 + Kotlin 路径安全访问 + JNI + Dart 浏览入口。core 88 测试全过。
+- **2026-10-03**：阶段 3 规划建立 —— 任务 22-37（16 项）。基于与 AiCode 的逐项对比，补齐 IDE 工作台形态（文件编辑器/Git/多会话/多模型）与核心能力接线（端侧推理落地/多模态激活/子代理并行），以及文档同步与真机发版。阶段 3 完成后 yaya_ai 从「内核 + 聊天壳」演进为「内核 + IDE 工作台」。

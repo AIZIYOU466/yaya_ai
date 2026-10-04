@@ -37,6 +37,9 @@ object ProotManager {
             "--rootfs=${rootfs.absolutePath}",
             "--bind=/dev", "--bind=/proc", "--bind=/sys",
             "--bind=/storage/emulated/0:/sdcard",
+            // 把 App 工作区挂进容器固定 /workspace，使 git/terminal 与 file 工具看到同一目录
+            // （ROADMAP 任务 23 前置：Git UI 依赖容器内 git 操作工作区）。
+            "--bind=${File(context.filesDir, "workspace")}:/workspace",
             // Alpine 默认只有 busybox sh（无 bash），用 /bin/sh 保证通用。
             "/bin/sh", "-l"
         )

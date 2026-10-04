@@ -4,6 +4,7 @@ import 'package:go_router/go_router.dart';
 
 import 'screens/home_screen.dart';
 import 'screens/chat_screen.dart';
+import 'screens/files_screen.dart';
 
 void main() {
   runApp(
@@ -54,6 +55,10 @@ final GoRouter _router = GoRouter(
     GoRoute(
       path: '/chat',
       builder: (context, state) => const ChatScreen(),
+    ),
+    GoRoute(
+      path: '/files',
+      builder: (context, state) => const FilesScreen(),
     ),
   ],
 );

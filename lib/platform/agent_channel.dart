@@ -12,6 +12,8 @@ class AgentChannel {
   static const _model = EventChannel('com.yaya.ai/model');
   static const _timeout = Duration(seconds: 10);
   static const _startTimeout = Duration(seconds: 30);
+  /// 工作区文件读写：大文件传输更宽裕的超时。
+  static const _fsTimeout = Duration(seconds: 30);
 
   /// Agent 事件流（每项为事件 JSON 字符串，协议见 core/src/agent/events.rs）。
   static Stream<String> get agentEvents =>
@@ -45,6 +47,33 @@ class AgentChannel {
   static Future<String?> loadRecentSession() async =>
       await _method.invokeMethod<String>('loadRecentSession').timeout(_timeout);
 
+  /// 所有会话列表（`[{id,title,updatedAt,messageCount}]`，新 → 旧）。
+  static Future<String> listSessions() async =>
+      await _method.invokeMethod<String>('listSessions').timeout(_timeout) ?? '[]';
+
+  /// 指定会话（`{sessionId,title,messages}`）；不存在返回 null。
+  static Future<String?> loadSession(String sessionId) async =>
+      await _method
+              .invokeMethod<String>('loadSession', {'sessionId': sessionId})
+              .timeout(_timeout);
+
+  /// 重命名会话。
+  static Future<bool> renameSession(String sessionId, String title) async =>
+      await _method
+              .invokeMethod<bool>('renameSession', {
+                'sessionId': sessionId,
+                'title': title,
+              })
+              .timeout(_timeout) ??
+          false;
+
+  /// 删除会话及其消息与检查点。
+  static Future<bool> deleteSession(String sessionId) async =>
+      await _method
+              .invokeMethod<bool>('deleteSession', {'sessionId': sessionId})
+              .timeout(_timeout) ??
+          false;
+
   /// 会话检查点列表（`[{messages:[...]}]`，新 → 旧）。
   static Future<String> checkpoints(String sessionId) async =>
       await _method
@@ -66,6 +95,49 @@ class AgentChannel {
               .invokeMethod<String>('workspaceList', {'path': path})
               .timeout(_timeout) ??
           '{"ok":false}';
+
+  /// 读取工作区单文件全文（`{ok,content}`）；不存在或过大返回 `{ok:false,message}`。
+  /// 供文件编辑器（ROADMAP 任务 22）加载内容。
+  static Future<String> workspaceRead(String path) async =>
+      await _method
+              .invokeMethod<String>('workspaceRead', {'path': path})
+              .timeout(_fsTimeout) ??
+          '{"ok":false}';
+
+  /// 写入工作区单文件（自动创建父目录，`{ok,created}`）。
+  static Future<String> workspaceWrite(
+    String path,
+    String content,
+  ) async =>
+      await _method.invokeMethod<String>(
+              'workspaceWrite',
+              {'path': path, 'content': content, 'overwrite': true},
+            )
+              .timeout(_fsTimeout) ??
+          '{"ok":false}';
+
+  /// 删除工作区文件（或空目录，`{ok}`）。
+  static Future<String> workspaceDelete(String path) async =>
+      await _method
+              .invokeMethod<String>('workspaceDelete', {'path': path})
+              .timeout(_timeout) ??
+          '{"ok":false}';
+
+  /// 执行 git 子命令（对工作区 /workspace，经 proot 容器），返回 `{ok, output}`。
+  /// [subargs] 为 git 子命令的参数数组（如 `['status', '--porcelain']`），
+  /// 由 Kotlin 侧逐词 shell 转义，防止用户输入注入。
+  static Future<String> gitRun(List<String> subargs,
+          {Duration timeout = const Duration(seconds: 30)}) async =>
+      await _method.invokeMethod<String>('gitRun', {
+        'subargs': subargs,
+        'timeoutMs': timeout.inMilliseconds,
+      }).timeout(timeout + const Duration(seconds: 3)) ??
+          '{"ok":false,"output":""}';
+
+  /// 检测 git 是否可用、工作区是否已是仓库，返回 `{gitOk, isRepo}`。
+  static Future<String> gitDetect() async =>
+      await _method.invokeMethod<String>('gitDetect').timeout(_timeout) ??
+          '{"gitOk":false,"isRepo":false}';
 
   /// 端侧本地模型是否可用（非 STUB）。
   static Future<bool> localAvailable() async =>

@@ -39,6 +39,7 @@
 | 链路 | 协议 | 实现位置 |
 |---|---|---|
 | Dart UI ↔ Kotlin 执行层 | Platform Channel（进程内） | `lib/platform/agent_channel.dart` ↔ `MainActivity.kt` |
+| Dart Git UI ↔ Kotlin GitHost ↔ proot 容器 | Platform Channel + stdin/stdout | `GitHost.kt` ↔ `ProotManager.kt` |
 | Kotlin ↔ Rust Core | JNI | `android/.../AgentHost.kt` ↔ `jni/src/lib.rs` |
 | Kotlin ↔ C/C++（llama） | JNI | `ModelBridge.kt` ↔ `llama_jni.cpp` |
 | Rust Core ↔ 云端 | HTTP/2 + SSE | `core/src/agent/cloud.rs`（feature `cloud-http`） |
@@ -137,6 +138,7 @@
 ## R19 工作区文件系统
 
 - 工作区根：`filesDir/workspace/`（Kotlin `WorkspaceFileAccess`），工具只接受**相对路径**；所有路径先 `normalize` 再校验必须落在工作区内（防目录穿越），绝对路径与越界路径一律拒绝。
+- **容器一致性**：工作区同时由 `ProotManager` bind 进 proot 容器固定路径 `/workspace`，使 `git`/`terminal` 工具与 `file_*` 工具看到同一目录（ROADMAP 任务 23）。
 - 工具：`file_list` / `file_read` / `file_write` / `file_edit` / `file_delete`（唯一实现在 `core/src/agent/workspace.rs`）；读取有 2000 行 / 200KB 窗口，超限截断并用 `start_line` 分段续读。
 - 权限：读/列只读放行（PLAN 可用）；写/编辑/删除不可逆（BUILD 需确认，见 R12）。
 - **禁止**在 Kotlin/Dart 侧重复实现工具语义与参数校验（只做平台文件操作与路径安全）。

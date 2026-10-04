@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 
 import 'chat_screen.dart';
 import 'config_screen.dart';
+import 'files_screen.dart';
 import 'mcp_screen.dart';
 import 'terminal_screen.dart';
 
-/// 主壳：底部导航 + IndexedStack 集成四个页面。
+/// 主壳：底部导航 + IndexedStack 集成五个页面。
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -24,6 +25,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children: const [
           ChatScreen(),
           TerminalScreen(),
+          FilesScreen(),
           MCPScreen(),
           ConfigScreen(),
         ],
@@ -41,6 +43,11 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: Icon(Icons.terminal_outlined),
             selectedIcon: Icon(Icons.terminal),
             label: '终端',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.folder_outlined),
+            selectedIcon: Icon(Icons.folder),
+            label: '文件',
           ),
           NavigationDestination(
             icon: Icon(Icons.extension_outlined),

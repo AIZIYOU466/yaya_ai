@@ -96,6 +96,22 @@ class MainActivity : FlutterActivity() {
                         result.success(true)
                     }
                     "loadRecentSession" -> result.success(agentHost.recentSessionJson())
+                    "listSessions" -> result.success(agentHost.sessionsJson())
+                    "loadSession" -> {
+                        val id = call.argument<String>("sessionId") ?: ""
+                        result.success(agentHost.sessionJson(id))
+                    }
+                    "renameSession" -> {
+                        val id = call.argument<String>("sessionId") ?: ""
+                        val title = call.argument<String>("title") ?: ""
+                        agentHost.renameSession(id, title)
+                        result.success(true)
+                    }
+                    "deleteSession" -> {
+                        val id = call.argument<String>("sessionId") ?: ""
+                        agentHost.deleteSession(id)
+                        result.success(true)
+                    }
                     "checkpoints" -> {
                         val sid = call.argument<String>("sessionId") ?: ""
                         result.success(agentHost.checkpointsJson(sid))
@@ -106,6 +122,53 @@ class MainActivity : FlutterActivity() {
                         val path = call.argument<String>("path") ?: ""
                         result.success(agentHost.wsList(path))
                     }
+                    // 单文件读写走后台线程：read 上限 10MB，主线程读会冻结 UI。
+                    "workspaceRead" -> {
+                        val path = call.argument<String>("path") ?: ""
+                        Thread {
+                            val msg = agentHost.wsRead(path)
+                            runOnUiThread { result.success(msg) }
+                        }.apply {
+                            name = "yaya-ws-read"
+                            start()
+                        }
+                    }
+                    "workspaceWrite" -> {
+                        val path = call.argument<String>("path") ?: ""
+                        val content = call.argument<String>("content") ?: ""
+                        val overwrite = call.argument<Boolean>("overwrite") ?: true
+                        val req = JSONObject()
+                            .put("path", path)
+                            .put("content", content)
+                            .put("overwrite", overwrite)
+                            .toString()
+                        Thread {
+                            val msg = agentHost.wsWrite(req)
+                            runOnUiThread { result.success(msg) }
+                        }.apply {
+                            name = "yaya-ws-write"
+                            start()
+                        }
+                    }
+                    "workspaceDelete" -> {
+                        val path = call.argument<String>("path") ?: ""
+                        result.success(agentHost.wsDelete(path))
+                    }
+                    // Git 版本管理（ROADMAP 任务 23）：经 proot 容器对 /workspace 执行 git。
+                    "gitRun" -> {
+                        val subargs = call.argument<List<String>>("subargs") ?: emptyList()
+                        val timeout = call.argument<Number>("timeoutMs")?.toLong() ?: 30000L
+                        val arr = JSONArray()
+                        for (s in subargs) arr.put(s)
+                        Thread {
+                            val msg = GitHost.run(this, arr.toString(), timeout)
+                            runOnUiThread { result.success(msg) }
+                        }.apply {
+                            name = "yaya-git-run"
+                            start()
+                        }
+                    }
+                    "gitDetect" -> result.success(GitHost.detect(this))
                     "localAvailable" -> result.success(agentHost.localAvailable())
                     "networkAvailable" -> result.success(isNetworkAvailable())
                     "rootfsInstalled" -> result.success(RootfsInstaller.isInstalledCurrent(this))
