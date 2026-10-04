@@ -5,6 +5,7 @@
 
 pub mod canary;
 pub mod capability;
+pub mod degrade;
 pub mod events;
 pub mod executor;
 pub mod local_parse;
@@ -15,6 +16,7 @@ pub mod openai;
 pub mod permission;
 pub mod router;
 pub mod run;
+pub mod signals;
 pub mod skill;
 pub mod state;
 pub mod subagent;
@@ -26,6 +28,7 @@ pub mod workspace;
 pub mod cloud;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub use model::ModelBackend;
 pub use router::{Backend, RouteHints};
@@ -34,14 +37,17 @@ pub use events::Event;
 pub use executor::{Action, ActionExecutor};
 pub use mcp::{McpClient, McpTool};
 pub use model::{
-    Content, ContentPart, GenerateRequest, ImageUrl, Message, ModelOutput, ToolCall, ToolSpec,
+    BackendError, Content, ContentPart, FailureKind, GenerateRequest, ImageUrl, Message,
+    ModelOutput, ToolCall, ToolSpec,
 };
 pub use permission::{ApprovalRequest, Approver, Reversibility, RunMode, Verdict};
 pub use memory::MemoryStore;
 pub use workspace::FileAccess;
 pub use router::{complexity, route, Complexity};
 pub use run::{run_loop, RunConfig};
+pub use signals::SignalSlots;
 pub use state::{TaskMachine, TaskState};
+pub use degrade::{DegradeMode, DegradeSignal, DegradeState};
 
 /// 循环机运行所需的三类平台能力 + 已注册的模型后端。
 pub struct AgentCore {
@@ -58,6 +64,10 @@ pub struct AgentCore {
     /// 调用方填入的静态路由信号（force / network_ok / latency_sensitive）；
     /// 可用性信号（local_ok / desktop_ok / cloud_ok）由 [`AgentCore::effective_hints`] 依后端注册情况推导。
     pub hints: RouteHints,
+    /// 降级状态机（capability/mode 分离）：记录失败信号、决定当前 mode。
+    pub degrade: DegradeState,
+    /// 平台环境信号槽（Android 层写入，core 决策）。
+    pub signals: Arc<SignalSlots>,
 }
 
 impl AgentCore {
@@ -70,6 +80,8 @@ impl AgentCore {
             memory_store: None,
             file_access: None,
             hints: RouteHints::default(),
+            degrade: DegradeState::new(),
+            signals: SignalSlots::new(),
         }
     }
 
@@ -107,10 +119,10 @@ impl AgentCore {
         let usable = |b: Backend| self.backends.get(&b).map(|m| !m.is_stub()).unwrap_or(false);
         RouteHints {
             force: self.hints.force,
-            cloud_ok: self.backends.contains_key(&Backend::Cloud),
+            cloud_ok: self.backends.contains_key(&Backend::Cloud) && !self.signals.network_lost(),
             desktop_ok: self.backends.contains_key(&Backend::Desktop),
             local_ok: usable(Backend::Jni),
-            network_ok: self.hints.network_ok,
+            network_ok: self.hints.network_ok && !self.signals.network_lost(),
             latency_sensitive: self.hints.latency_sensitive,
         }
     }

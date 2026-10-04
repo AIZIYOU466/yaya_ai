@@ -60,6 +60,7 @@ class WorkspaceFileAccess(context: Context) {
         return try {
             f.parentFile?.mkdirs()
             val created = !f.exists()
+            if (!created) backup(f)
             f.writeText(content)
             ok().put("created", created).toString()
         } catch (e: Exception) {
@@ -67,21 +68,27 @@ class WorkspaceFileAccess(context: Context) {
         }
     }
 
-    /** 局部替换：入参 `{path,old_string,new_string}`。 */
-    fun edit(json: String): String {
-        val req = JSONObject(json)
-        val path = req.optString("path")
-        val old = req.optString("old_string")
-        val new = req.optString("new_string")
+    /** 目标是否存在：`{"ok":true,"exists":true}`。 */
+    fun exists(path: String): String {
         val f = resolve(path) ?: return err("路径越界或非法: $path")
-        if (!f.isFile) return err("文件不存在: $path")
-        return try {
-            val text = f.readText()
-            if (!text.contains(old)) return err("$path 中未找到目标片段")
-            f.writeText(text.replace(old, new))
-            ok().toString()
-        } catch (e: Exception) {
-            err("编辑失败: ${e.message}")
+        return ok().put("exists", f.exists()).toString()
+    }
+
+    /** 覆盖已有文件前备份到 `backups/workspace/`（工作区外，模型不可见），保留最近 [`BACKUP_KEEP`] 份。 */
+    private fun backup(f: File) {
+        try {
+            val dir = File(root.parentFile, "backups/workspace")
+            dir.mkdirs()
+            val bak = File(dir, "${System.currentTimeMillis()}_${f.name}.bak")
+            f.copyTo(bak, overwrite = true)
+            val keep = dir.listFiles { x -> x.isFile }?.toMutableList() ?: mutableListOf()
+            while (keep.size > BACKUP_KEEP) {
+                val oldest = keep.minByOrNull { it.lastModified() } ?: break
+                oldest.delete()
+                keep.remove(oldest)
+            }
+        } catch (_: Exception) {
+            // 备份尽力而为，失败不阻断写入
         }
     }
 
@@ -111,5 +118,8 @@ class WorkspaceFileAccess(context: Context) {
     private companion object {
         /** 单次读入内存上限：10MB。 */
         const val MAX_READ_BYTES = 10 * 1024 * 1024L
+
+        /** 工作区备份保留份数。 */
+        const val BACKUP_KEEP = 5
     }
 }

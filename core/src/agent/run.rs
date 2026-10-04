@@ -7,10 +7,13 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 use crate::agent::capability::Capabilities;
+use crate::agent::degrade::DegradeMode;
 use crate::agent::events::Event;
-use crate::agent::model::{Content, GenerateRequest, Message, ToolCall};
+use crate::agent::model::{
+    BackendError, Content, ContentPart, GenerateRequest, Message, ModelOutput, ToolCall,
+};
 use crate::agent::permission::{self, ApprovalRequest, RunMode, Verdict};
-use crate::agent::router::route;
+use crate::agent::router::{route, Backend};
 use crate::agent::state::{TaskMachine, TaskState};
 use crate::agent::subagent;
 use crate::agent::tools;
@@ -35,6 +38,9 @@ pub struct RunConfig {
     pub capabilities: Capabilities,
     /// 任务开始前是否运行金丝雀探测（任务 14）。
     pub canary: bool,
+    /// 降级状态快照（conmit 2，从平台注入）：`DegradeState::snapshot()` 的 JSON，
+    /// 未提供/非法时回退 Full（安全默认）。
+    pub degrade_state: Option<Value>,
 }
 
 impl Default for RunConfig {
@@ -50,6 +56,7 @@ impl Default for RunConfig {
             mcp_tool_allowlist: None,
             capabilities: Capabilities::default(),
             canary: false,
+            degrade_state: None,
         }
     }
 }
@@ -90,6 +97,50 @@ pub fn compact_messages(messages: &mut Vec<Message>, max: usize) {
     );
 }
 
+/// 按降级 mode 裁剪消息：视觉不可用（NoTools 及以下）时把图片消息替换为文本占位。
+pub fn messages_for_mode(messages: &[Message], mode: DegradeMode) -> Vec<Message> {
+    if mode.vision_enabled() {
+        return messages.to_vec();
+    }
+    messages
+        .iter()
+        .map(|m| {
+            let mut m2 = m.clone();
+            if let Some(Content::Parts(parts)) = &m2.content {
+                if parts
+                    .iter()
+                    .any(|p| matches!(p, ContentPart::ImageUrl { .. }))
+                {
+                    m2.content = Some(Content::text(
+                        "[图像已省略：当前端点视觉能力不可用]",
+                    ));
+                }
+            }
+            m2
+        })
+        .collect()
+}
+
+/// 降级恢复重探：单轮已知答案探测（简单算术），不走完整 run_loop 避免递归。
+/// 通过（输出含期望关键字）说明端点质量回稳，返回 true。
+fn probe_restored(core: &mut AgentCore, backend: Backend, cfg: &RunConfig) -> bool {
+    let req = GenerateRequest {
+        messages: vec![Message::user("只输出一个数字：1+1 等于几？")],
+        tools: vec![],
+        model: cfg.model.clone(),
+        max_tokens: Some(64),
+        stream: false,
+    };
+    let Some(backend_impl) = core.backend_mut(backend) else {
+        return false;
+    };
+    let mut sink = |_t: &str| Ok(());
+    match backend_impl.generate(&req, &mut sink) {
+        Ok(o) => o.text.contains("2"),
+        Err(_) => false,
+    }
+}
+
 /// 运行一次任务循环，事件经 `on_event` 实时上报。
 /// 成功返回最终文本；`on_event` 返回 Err 表示调用方要求中止（取消）。
 pub fn run_loop(
@@ -98,11 +149,24 @@ pub fn run_loop(
     cfg: &RunConfig,
     on_event: &mut dyn FnMut(Event) -> Result<(), String>,
 ) -> Result<String, String> {
+    // 恢复跨任务降级状态（commit 2）：非法/缺失回退 Full（安全默认）。
+    if let Some(snap) = &cfg.degrade_state {
+        core.degrade = crate::agent::degrade::DegradeState::from_snapshot(snap);
+        if core.degrade.mode() != DegradeMode::Full {
+            on_event(Event::Notice {
+                message: format!(
+                    "端点处于降级模式（{}），将限制工具/视觉能力直至质量恢复",
+                    core.degrade.mode().label()
+                ),
+            })?;
+        }
+    }
     // 能力驱动降级（任务 13）：钳制 token 预算、推导压缩阈值。
     let max_tokens = cfg.capabilities.clamp_max_tokens(cfg.max_tokens);
     let max_messages = cfg.capabilities.resolved_max_messages(cfg.max_messages);
     // 金丝雀探测（任务 14）：启用时先跑一轮已知答案的探测，异常经 Notice 上报。
-    if cfg.canary {
+    // 省电模式跳过（commit 2：健康探测降频）。
+    if cfg.canary && !core.signals.power_save() {
         if let Some(warn) = crate::agent::canary::run(core, cfg, on_event) {
             on_event(Event::Notice { message: warn })?;
         }
@@ -174,6 +238,13 @@ pub fn run_loop(
             Ok(b) => b,
             Err(e) => return fail(on_event, e),
         };
+        // 后台信号：不再发起新的模型生成，任务结束（恢复靠 R13 检查点重跑）。
+        if core.signals.app_background() {
+            on_event(Event::Notice {
+                message: "应用进入后台，任务已暂停；回到前台后可继续".to_string(),
+            })?;
+            break;
+        }
 
         if let Err(e) = machine.transition(TaskState::Executing) {
             return fail(on_event, e);
@@ -181,13 +252,19 @@ pub fn run_loop(
         emit_state(on_event, &machine)?;
 
         let req = GenerateRequest {
-            messages: messages.clone(),
-            tools: tool_specs.clone(),
+            messages: messages_for_mode(&messages, core.degrade.mode()),
+            tools: if core.degrade.mode().tools_enabled() {
+                tool_specs.clone()
+            } else {
+                vec![]
+            },
             model: cfg.model.clone(),
             max_tokens,
+            stream: core.degrade.mode().streaming_enabled(),
         };
 
-        let output = {
+        // 生成结果（错误与 body_received 带出来，借用释放后再决策）。
+        let gen_result: Result<ModelOutput, BackendError> = {
             let Some(backend_impl) = core.backend_mut(backend) else {
                 return fail(on_event, format!("路由选中的后端 {backend:?} 未注册"));
             };
@@ -196,16 +273,75 @@ pub fn run_loop(
                     text: t.to_string(),
                 })
             };
-            match backend_impl.generate(&req, &mut on_token) {
-                Ok(o) => o,
-                Err(e) => return fail(on_event, format!("生成失败（{backend:?}）: {e}")),
+            backend_impl.generate(&req, &mut on_token)
+        };
+        let output = match gen_result {
+            Ok(o) => o,
+            // 失败：喂降级状态机。若触发升级（降级档变化）则按降级 mode 就地重试
+            // 一次（大概率恢复可用）；否则 fail（计数已累计，经快照跨任务延续）。
+            Err(e) => {
+                let upgraded = e.signal.map(|s| core.degrade.note_failure(s)).unwrap_or(false);
+                if !upgraded {
+                    return fail(on_event, format!("生成失败（{backend:?}）: {e}"));
+                }
+                on_event(Event::Notice {
+                    message: format!(
+                        "端点异常（{e}），已降级为 {} 并重试",
+                        core.degrade.mode().label()
+                    ),
+                })?;
+                // 降级后重新构造请求（不带 tools / 关流式），重新借用 backend。
+                let req2 = GenerateRequest {
+                    messages: messages_for_mode(&messages, core.degrade.mode()),
+                    tools: if core.degrade.mode().tools_enabled() {
+                        tool_specs.clone()
+                    } else {
+                        vec![]
+                    },
+                    model: cfg.model.clone(),
+                    max_tokens,
+                    stream: core.degrade.mode().streaming_enabled(),
+                };
+                let retry_result: Result<ModelOutput, BackendError> = {
+                    let backend_impl = core.backend_mut(backend).unwrap();
+                    let mut on_token2 = |t: &str| {
+                        on_event(Event::Token {
+                            text: t.to_string(),
+                        })
+                    };
+                    backend_impl.generate(&req2, &mut on_token2)
+                };
+                match retry_result {
+                    Ok(o) => o,
+                    Err(e2) => return fail(on_event, format!("生成失败（{backend:?}）: {e2}")),
+                }
             }
         };
+        // 生成成功：记成功计数。降级档位下达到退避阈值（note_success 置 probe_ready）
+        // 时跑一次金丝雀重探，通过即恢复 Full；失败保持降级并加倍退避。
+        let probe_ready = core.degrade.note_success();
+        if probe_ready && !core.signals.power_save() {
+            core.degrade.begin_probe();
+            let restored = probe_restored(core, backend, cfg);
+            core.degrade.end_probe(restored);
+            if restored {
+                on_event(Event::Notice {
+                    message: "端点质量已恢复，退出降级模式".to_string(),
+                })?;
+            }
+        }
 
         if let Err(e) = machine.transition(TaskState::Streaming) {
             return fail(on_event, e);
         }
         emit_state(on_event, &machine)?;
+
+        // 协议层告警（未知 finish_reason、max_tokens 被截断等）转 Notice，不阻断生成。
+        for w in &output.warnings {
+            on_event(Event::Notice {
+                message: format!("模型协议告警: {w}"),
+            })?;
+        }
 
         if let Some(u) = output.usage {
             on_event(Event::Usage {
@@ -395,10 +531,10 @@ mod tests {
             &mut self,
             _req: &GenerateRequest,
             on_token: &mut dyn FnMut(&str) -> Result<(), String>,
-        ) -> Result<ModelOutput, String> {
+        ) -> Result<ModelOutput, BackendError> {
             let out = self.steps.pop_front().unwrap_or_default();
             if !out.text.is_empty() {
-                on_token(&out.text)?;
+                on_token(&out.text).map_err(BackendError::fatal)?;
             }
             Ok(out)
         }
@@ -446,6 +582,7 @@ mod tests {
                 },
             }],
             usage: None,
+            warnings: vec![],
         }
     }
 
@@ -462,6 +599,7 @@ mod tests {
                 },
             }],
             usage: None,
+            warnings: vec![],
         }
     }
 
@@ -573,6 +711,7 @@ mod tests {
                     text: "搞定".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -611,6 +750,7 @@ mod tests {
                     text: "x".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -662,6 +802,7 @@ mod tests {
                 },
             }],
             usage: None,
+            warnings: vec![],
         }
     }
 
@@ -674,6 +815,7 @@ mod tests {
                     text: "完成".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -715,6 +857,7 @@ mod tests {
                     text: "ok".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -748,6 +891,7 @@ mod tests {
                     text: "知道了".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -777,6 +921,7 @@ mod tests {
                     text: "x".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -800,6 +945,7 @@ mod tests {
                     text: "x".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -825,6 +971,7 @@ mod tests {
                     text: "x".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -850,6 +997,7 @@ mod tests {
                 completion_tokens: 4,
                 total_tokens: 7,
             }),
+            warnings: vec![],
         }]);
         let mut events = Vec::new();
         run_loop(&mut core, "hi", &RunConfig::default(), &mut |e| {
@@ -874,7 +1022,7 @@ mod tests {
                 &mut self,
                 req: &GenerateRequest,
                 _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
-            ) -> Result<ModelOutput, String> {
+            ) -> Result<ModelOutput, BackendError> {
                 if let Some(c) = req.messages.first().and_then(|m| m.content.as_ref()) {
                     self.captured.lock().unwrap().push_str(c.text_str());
                 }
@@ -882,6 +1030,7 @@ mod tests {
                     text: "x".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 })
             }
             fn backend(&self) -> Backend {
@@ -954,11 +1103,13 @@ mod tests {
                         },
                     }],
                     usage: None,
+                    warnings: vec![],
                 },
                 ModelOutput {
                     text: "ok".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -1014,7 +1165,7 @@ mod tests {
                 &mut self,
                 req: &GenerateRequest,
                 _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
-            ) -> Result<ModelOutput, String> {
+            ) -> Result<ModelOutput, BackendError> {
                 if let Some(c) = req.messages.first().and_then(|m| m.content.as_ref()) {
                     self.captured.lock().unwrap().push_str(c.text_str());
                 }
@@ -1022,6 +1173,7 @@ mod tests {
                     text: "x".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 })
             }
             fn backend(&self) -> Backend {
@@ -1063,6 +1215,7 @@ mod tests {
                     },
                 }],
                 usage: None,
+                warnings: vec![],
             }
         }
         // 主任务调 subagent → 子任务直接输出“子结果” → 主任务收尾“主结束”。
@@ -1072,11 +1225,13 @@ mod tests {
                     text: "子结果".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
                 ModelOutput {
                     text: "主结束".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -1107,7 +1262,7 @@ mod tests {
                 &mut self,
                 req: &GenerateRequest,
                 on_token: &mut dyn FnMut(&str) -> Result<(), String>,
-            ) -> Result<ModelOutput, String> {
+            ) -> Result<ModelOutput, BackendError> {
                 for m in &req.messages {
                     if m.role == "tool" {
                         let text = m
@@ -1120,7 +1275,7 @@ mod tests {
                 }
                 let out = self.steps.pop_front().unwrap_or_default();
                 if !out.text.is_empty() {
-                    on_token(&out.text)?;
+                    on_token(&out.text).map_err(BackendError::fatal)?;
                 }
                 Ok(out)
             }
@@ -1138,6 +1293,7 @@ mod tests {
                         text: "收尾".into(),
                         tool_calls: vec![],
                         usage: None,
+                        warnings: vec![],
                     },
                 ]),
             seen: seen.clone(),
@@ -1168,6 +1324,7 @@ mod tests {
                     text: "完成".into(),
                     tool_calls: vec![],
                     usage: None,
+                    warnings: vec![],
                 },
             ],
         );
@@ -1199,5 +1356,90 @@ mod tests {
             calls.lock().unwrap().is_empty(),
             "白名单外的工具不应被真正调用"
         );
+    }
+
+    #[test]
+    fn downgrade_on_protocol_pollution_retries_without_tools() {
+        use crate::agent::degrade::{DegradeSignal, DegradeState};
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        /// 首次调用返回协议污染（带信号），之后成功；记录每次请求是否带 tools。
+        struct Flaky {
+            calls: Arc<Mutex<Vec<bool>>>,
+            count: Arc<AtomicUsize>,
+        }
+        impl ModelBackend for Flaky {
+            fn generate(
+                &mut self,
+                req: &GenerateRequest,
+                _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+            ) -> Result<ModelOutput, BackendError> {
+                let n = self.count.fetch_add(1, AtomicOrdering::SeqCst);
+                self.calls.lock().unwrap().push(req.tools.is_empty());
+                match n {
+                    // 第 1 次：协议污染（触发降级）。
+                    0 => Err(BackendError::protocol("协议污染: 测试")
+                        .with_signal(DegradeSignal::ToolProtocol)),
+                    // 第 2 次：降级重试成功。
+                    1 => Ok(ModelOutput {
+                        text: "完成".into(),
+                        tool_calls: vec![],
+                        usage: None,
+                        warnings: vec![],
+                    }),
+                    // 第 3 次：金丝雀重探（末尾为探测题），返回期望答案 "2" 表示质量恢复。
+                    _ => Ok(ModelOutput {
+                        text: "2".into(),
+                        tool_calls: vec![],
+                        usage: None,
+                        warnings: vec![],
+                    }),
+                }
+            }
+            fn backend(&self) -> Backend {
+                Backend::Cloud
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let count = Arc::new(AtomicUsize::new(0));
+        let mut core = AgentCore::new(Box::new(NoopExecutor));
+        core.register_backend(Box::new(Flaky {
+            calls: calls.clone(),
+            count: count.clone(),
+        }));
+        core.hints = RouteHints {
+            force: Some(Backend::Cloud),
+            ..Default::default()
+        };
+        // 预置 2 次 ToolProtocol 失败（阈值 3），使本轮首次失败即触发降级。
+        let mut ds = DegradeState::new();
+        ds.note_failure(DegradeSignal::ToolProtocol);
+        ds.note_failure(DegradeSignal::ToolProtocol);
+        let cfg = RunConfig {
+            degrade_state: Some(ds.snapshot()),
+            ..Default::default()
+        };
+
+        let mut events = Vec::new();
+        let out = run_loop(&mut core, "任务", &cfg, &mut |e| {
+            events.push(e);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(out, "完成");
+        // 第 1 次请求带 tools（Full），降级重试后不带（NoTools）；第 3 次为金丝雀重探。
+        let c = calls.lock().unwrap().clone();
+        assert_eq!(c[0], false, "首次请求应带 tools");
+        assert_eq!(c[1], true, "降级重试应不带 tools");
+        assert!(c.len() >= 3, "降级后应触发一次金丝雀重探");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::Notice { message } if message.contains("已降级")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::Notice { message } if message.contains("已恢复")
+        )));
     }
 }

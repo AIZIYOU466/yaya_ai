@@ -69,6 +69,30 @@ class AgentHost(
 
     private external fun nativeCancel()
 
+    /** 网络连接丢失（`NetworkCallback.onLost`）/恢复（`onAvailable`）。 */
+    private external fun nativeSetNetworkLost(lost: Boolean)
+
+    /** App 前后台切换（`onStop`/`onStart`）。 */
+    private external fun nativeSetAppBackground(background: Boolean)
+
+    /** 系统省电模式。 */
+    private external fun nativeSetPowerSave(save: Boolean)
+
+    /** Kotlin 侧信号转发：网络连接丢失/恢复。 */
+    fun setNetworkLost(lost: Boolean) {
+        if (libLoaded) nativeSetNetworkLost(lost)
+    }
+
+    /** Kotlin 侧信号转发：App 前后台。 */
+    fun setAppBackground(background: Boolean) {
+        if (libLoaded) nativeSetAppBackground(background)
+    }
+
+    /** Kotlin 侧信号转发：省电模式。 */
+    fun setPowerSave(save: Boolean) {
+        if (libLoaded) nativeSetPowerSave(save)
+    }
+
     /** 同步运行一次任务循环；应在后台线程调用。返回最终文本或 "ERROR: ..."。 */
     fun run(taskId: String, prompt: String, configJson: String): String {
         if (!libLoaded) {
@@ -80,7 +104,26 @@ class AgentHost(
             db.insertMessage(taskId, "user", prompt, true)
         }
         syncMcpServers(configJson)
-        return nativeRunLoop(taskId, prompt, configJson, this)
+        // 注入降级状态（commit 2）：上次任务经 degrade_snapshot 落盘的快照，
+        // 让 Rust core 跨任务延续端点质量记忆（非法/缺失回退 Full，安全默认）。
+        val degradeJson = try {
+            val prefs = context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
+            prefs.getString("degrade_state", null)
+        } catch (_: Exception) {
+            null
+        }
+        val configWithDegrade = if (degradeJson.isNullOrEmpty()) {
+            configJson
+        } else {
+            try {
+                val obj = JSONObject(configJson)
+                obj.put("degradeState", JSONArray(degradeJson))
+                obj.toString()
+            } catch (_: Exception) {
+                configJson
+            }
+        }
+        return nativeRunLoop(taskId, prompt, configWithDegrade, this)
     }
 
     /** 按配置启停 stdio MCP 服务器；仅 stdio 受支持（AGENTS.md R10）。 */
@@ -302,6 +345,14 @@ class AgentHost(
                 "notice" -> {
                     db.insertMessage(sid, "system", ev.optString("message"), true)
                 }
+                "degrade_snapshot" -> {
+                    // 降级状态快照（commit 2）：跨任务延续，供下次 run 注入 Rust core。
+                    // 存 SharedPreferences（类同 mcp_servers 先例）；Dart 端 switch 无 default 忽略。
+                    context.getSharedPreferences("agent_state", android.content.Context.MODE_PRIVATE)
+                        .edit()
+                        .putString("degrade_state", ev.optString("state"))
+                        .apply()
+                }
                 "token" -> {
                     assistantBuffer.append(ev.optString("text"))
                 }
@@ -473,8 +524,8 @@ class AgentHost(
 
     fun wsList(path: String): String = workspace?.list(path) ?: errJson("工作区不可用")
     fun wsRead(path: String): String = workspace?.read(path) ?: errJson("工作区不可用")
+    fun wsExists(path: String): String = workspace?.exists(path) ?: errJson("工作区不可用")
     fun wsWrite(json: String): String = workspace?.write(json) ?: errJson("工作区不可用")
-    fun wsEdit(json: String): String = workspace?.edit(json) ?: errJson("工作区不可用")
     fun wsDelete(path: String): String = workspace?.delete(path) ?: errJson("工作区不可用")
 
     /** 工作区根路径（UI 展示用）。 */

@@ -53,6 +53,7 @@ pub fn reversibility_of(tool: &str) -> Reversibility {
         workspace::TOOL_FILE_LIST | workspace::TOOL_FILE_READ => Reversibility::Reversible,
         workspace::TOOL_FILE_WRITE
         | workspace::TOOL_FILE_EDIT
+        | workspace::TOOL_FILE_PATCH
         | workspace::TOOL_FILE_DELETE => Reversibility::Irreversible,
         _ => Reversibility::Irreversible,
     }

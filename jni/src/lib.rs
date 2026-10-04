@@ -11,7 +11,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use jni::objects::{GlobalRef, JObject, JString, JValue};
 use jni::sys::jstring;
@@ -22,7 +22,7 @@ use yaya_core::agent::executor::{Action, ActionExecutor};
 use yaya_core::agent::local_parse;
 use yaya_core::agent::mcp::{McpClient, McpTool};
 use yaya_core::agent::memory::{MemoryMeta, MemoryStore};
-use yaya_core::agent::model::{GenerateRequest, ModelBackend, ModelOutput};
+use yaya_core::agent::model::{BackendError, GenerateRequest, ModelBackend, ModelOutput};
 use yaya_core::agent::permission::{ApprovalRequest, Approver, RunMode};
 use yaya_core::agent::router::{Backend, RouteHints};
 use yaya_core::agent::workspace::FileAccess;
@@ -30,6 +30,14 @@ use yaya_core::agent::{run_loop, AgentCore, Event, RunConfig};
 
 /// 单任务取消标志（里程碑一为单任务模型）。
 static CANCELLED: AtomicBool = AtomicBool::new(false);
+
+/// 全局环境信号槽（JNI 层写入，core 决策；与 `AgentCore.signals` 同一实例）。
+static SIGNALS: OnceLock<Arc<yaya_core::agent::SignalSlots>> = OnceLock::new();
+
+/// 获取或初始化全局信号槽（运行时单例，跨任务持久）。
+fn signals() -> &'static Arc<yaya_core::agent::SignalSlots> {
+    SIGNALS.get_or_init(|| yaya_core::agent::SignalSlots::new())
+}
 
 /// 满足 `with_local_frame` 的 `E: From<jni::errors::Error>` 约束，同时保留自定义字符串错误信息。
 struct JniErr(String);
@@ -180,7 +188,7 @@ impl ModelBackend for LocalBackend {
         &mut self,
         req: &GenerateRequest,
         on_token: &mut dyn FnMut(&str) -> Result<(), String>,
-    ) -> Result<ModelOutput, String> {
+    ) -> Result<ModelOutput, BackendError> {
         // 端侧小模型无 OpenAI tool_calls 字段：用 ChatML 模板渲染工具 schema 与历史，
         // 再从纯文本输出解析 <tool_call> 块（core/src/agent/local_parse.rs）。
         let system = req
@@ -195,9 +203,9 @@ impl ModelBackend for LocalBackend {
             "model": req.model,
             "model_path": self.model_path,
         }))
-        .map_err(|e| format!("请求序列化失败: {e}"))?;
-        let out = self.host.call_str("generatePrompt", &payload)?;
-        let v: Value = serde_json::from_str(&out).map_err(|e| format!("生成结果解析失败: {e}"))?;
+        .map_err(|e| BackendError::fatal(format!("请求序列化失败: {e}")))?;
+        let out = self.host.call_str("generatePrompt", &payload).map_err(BackendError::fatal)?;
+        let v: Value = serde_json::from_str(&out).map_err(|e| BackendError::fatal(format!("生成结果解析失败: {e}")))?;
         let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
         let text = v
             .get("text")
@@ -206,20 +214,21 @@ impl ModelBackend for LocalBackend {
             .to_string();
         // 端侧生成失败必须显式报错（Kotlin 经 {ok,text} 信封返回），绝不伪装成模型输出。
         if !ok {
-            return Err(if text.is_empty() {
+            return Err(BackendError::fatal(if text.is_empty() {
                 "端侧模型推理失败".to_string()
             } else {
                 text
-            });
+            }));
         }
         if !text.is_empty() {
-            on_token(&text)?;
+            on_token(&text).map_err(BackendError::fatal)?;
         }
         let tool_calls = local_parse::extract_tool_calls(&text);
         Ok(ModelOutput {
             text,
             tool_calls,
             usage: None,
+            warnings: vec![],
         })
     }
 
@@ -386,6 +395,20 @@ impl FileAccess for JniFileAccess {
         Ok(v.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string())
     }
 
+    fn exists(&mut self, path: &str) -> Result<bool, String> {
+        let out = self.host.call_str("wsExists", path)?;
+        let v: Value =
+            serde_json::from_str(&out).map_err(|e| format!("工作区存在性解析失败: {e}"))?;
+        if !v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
+            return Err(v
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("查询失败")
+                .to_string());
+        }
+        Ok(v.get("exists").and_then(|b| b.as_bool()).unwrap_or(false))
+    }
+
     fn write(&mut self, path: &str, content: &str, overwrite: bool) -> Result<bool, String> {
         let payload = serde_json::to_string(&serde_json::json!({
             "path": path,
@@ -404,27 +427,6 @@ impl FileAccess for JniFileAccess {
                 .to_string());
         }
         Ok(v.get("created").and_then(|b| b.as_bool()).unwrap_or(false))
-    }
-
-    fn edit(&mut self, path: &str, old_string: &str, new_string: &str) -> Result<(), String> {
-        let payload = serde_json::to_string(&serde_json::json!({
-            "path": path,
-            "old_string": old_string,
-            "new_string": new_string,
-        }))
-        .map_err(|e| format!("编辑参数序列化失败: {e}"))?;
-        let out = self.host.call_str("wsEdit", &payload)?;
-        let v: Value =
-            serde_json::from_str(&out).map_err(|e| format!("编辑结果解析失败: {e}"))?;
-        if v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false) {
-            Ok(())
-        } else {
-            Err(v
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("编辑失败")
-                .to_string())
-        }
     }
 
     fn delete(&mut self, path: &str) -> Result<(), String> {
@@ -615,6 +617,7 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
                 base_url,
                 api_key,
                 model.unwrap_or("gpt-4o-mini"),
+                signals().clone(),
             )?;
             core.register_backend(Box::new(cloud));
         }
@@ -631,6 +634,7 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
             network_ok,
             ..Default::default()
         };
+        core.signals = signals().clone();
 
         let mode = match config.get("mode").and_then(|v| v.as_str()) {
             Some("plan") => RunMode::Plan,
@@ -659,6 +663,7 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
                 config.get("capabilities"),
             ),
             canary: config.get("canary").and_then(|v| v.as_bool()).unwrap_or(false),
+            degrade_state: config.get("degradeState").cloned(),
             ..Default::default()
         };
 
@@ -670,7 +675,15 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
             Ok(())
         };
 
-        run_loop(&mut core, &prompt, &cfg, &mut on_event)
+        let res = run_loop(&mut core, &prompt, &cfg, &mut on_event);
+        // 任务结束（成功/失败）时，把降级状态快照经 onEvent 回传 Kotlin 持久化，
+        // 供下次任务注入恢复（AGENTS.md R13：Rust Core 不持久化，持久化在 Android 侧）。
+        // 复用 Event::DegradeSnapshot 走 on_event 闭包（含 CANCELLED 检查），
+        // 避免手写 JSON 与 Event 序列化漂移；快照发送失败（如已取消）不覆盖任务结果。
+        let _ = on_event(Event::DegradeSnapshot {
+            state: core.degrade.snapshot().to_string(),
+        });
+        res
     }))
     .unwrap_or_else(|_| Err("Rust Core panic (uncaught)".to_string()));
 
@@ -685,4 +698,39 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
 #[no_mangle]
 pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeCancel(_env: JNIEnv, _this: JObject) {
     CANCELLED.store(true, Ordering::SeqCst);
+}
+
+/// Kotlin: `external fun nativeSetNetworkLost(lost: Boolean)`
+/// 网络连接丢失（`NetworkCallback.onLost` 置位）/恢复（`onAvailable` 复位）。
+/// 置位时 core 路由避开 cloud、流中中止超时等待，快速失败让退避重试介入。
+#[no_mangle]
+pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeSetNetworkLost(
+    _env: JNIEnv,
+    _this: JObject,
+    lost: jni::sys::jboolean,
+) {
+    signals().network_lost.store(lost != 0, Ordering::Relaxed);
+}
+
+/// Kotlin: `external fun nativeSetAppBackground(background: Boolean)`
+/// App 前后台切换（`onStop`/`onStart`）。置位时不再发起新的模型生成，
+/// 当前任务经 Notice 结束（SSE 无法真正暂停，恢复靠 R13 检查点重跑）。
+#[no_mangle]
+pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeSetAppBackground(
+    _env: JNIEnv,
+    _this: JObject,
+    background: jni::sys::jboolean,
+) {
+    signals().app_background.store(background != 0, Ordering::Relaxed);
+}
+
+/// Kotlin: `external fun nativeSetPowerSave(save: Boolean)`
+/// 系统省电模式。置位时跳过金丝雀等额外请求（降频健康探测）。
+#[no_mangle]
+pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeSetPowerSave(
+    _env: JNIEnv,
+    _this: JObject,
+    save: jni::sys::jboolean,
+) {
+    signals().power_save.store(save != 0, Ordering::Relaxed);
 }

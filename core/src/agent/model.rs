@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::router::Backend;
+use crate::agent::degrade::DegradeSignal;
 
 /// OpenAI 多模态 content：字符串或内容部件数组。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -171,6 +172,74 @@ pub struct GenerateRequest {
     pub tools: Vec<ToolSpec>,
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
+    /// 是否流式（BareText 降级档关流式，走整包请求）。
+    pub stream: bool,
+}
+
+/// 后端失败类别（commit 1 起由 `openai::classify_status` 等判定）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// 不重试（400/401/403/404/422、配额耗尽、参数错误等）。
+    Fatal,
+    /// 可重试（429/408/5xx、连接重置、超时）。
+    Retry,
+    /// 协议污染（SSE 解析失败、tool_call 异常等），不重试、计入降级。
+    Protocol,
+}
+
+/// 后端生成失败：`kind` 决定重试策略，`signal` 携带降级计数来源，`message` 供展示。
+/// Display 输出 `[fatal]/[retry]/[protocol]` 前缀，供上层（降级状态机、fail 文案）消费。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendError {
+    pub kind: FailureKind,
+    pub signal: Option<DegradeSignal>,
+    pub message: String,
+    /// 上游 `Retry-After` 秒数（仅 429；供重试方优先遵守）。
+    pub retry_after: Option<u64>,
+}
+
+impl BackendError {
+    pub fn fatal(message: impl Into<String>) -> Self {
+        BackendError {
+            kind: FailureKind::Fatal,
+            signal: None,
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    pub fn retry(message: impl Into<String>) -> Self {
+        BackendError {
+            kind: FailureKind::Retry,
+            signal: None,
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    pub fn protocol(message: impl Into<String>) -> Self {
+        BackendError {
+            kind: FailureKind::Protocol,
+            signal: None,
+            message: message.into(),
+            retry_after: None,
+        }
+    }
+
+    pub fn with_signal(mut self, signal: DegradeSignal) -> Self {
+        self.signal = Some(signal);
+        self
+    }
+}
+
+impl std::fmt::Display for BackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.kind {
+            FailureKind::Fatal => write!(f, "[fatal] {}", self.message),
+            FailureKind::Retry => write!(f, "[retry] {}", self.message),
+            FailureKind::Protocol => write!(f, "[protocol] {}", self.message),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -179,6 +248,8 @@ pub struct ModelOutput {
     pub tool_calls: Vec<ToolCall>,
     /// 本次生成消耗的 token（后端提供时携带；端侧通常为 None）。
     pub usage: Option<Usage>,
+    /// 协议层告警（未知 finish_reason、工具调用 ID 异常等），不阻断生成，由上层转 Notice。
+    pub warnings: Vec<String>,
 }
 
 /// 一次生成消耗的 token。
@@ -199,7 +270,7 @@ pub trait ModelBackend: Send {
         &mut self,
         req: &GenerateRequest,
         on_token: &mut dyn FnMut(&str) -> Result<(), String>,
-    ) -> Result<ModelOutput, String>;
+    ) -> Result<ModelOutput, BackendError>;
 
     /// 该后端是否桩实现（不可用）。路由据此避开（AGENTS.md R2/R4）。
     fn is_stub(&self) -> bool {

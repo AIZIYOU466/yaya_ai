@@ -43,6 +43,11 @@ pub enum Event {
     Notice {
         message: String,
     },
+    /// 降级状态快照（任务结束前发出）：`state` 为 `DegradeState::snapshot()` 的 JSON 字符串，
+    /// 供平台侧持久化（commit 2）跨任务延续降级；Dart 侧 switch 无 default 自动忽略。
+    DegradeSnapshot {
+        state: String,
+    },
     Done {
         text: String,
     },

@@ -40,6 +40,7 @@ pub fn run(
             mcp_tool_allowlist: None,
             capabilities: cfg.capabilities,
             canary: false,
+            degrade_state: None,
         };
         match run_loop(core, &p.prompt, &sub_cfg, on_event) {
             Ok(text) if text.contains(&p.expect) => {}
@@ -60,7 +61,7 @@ pub fn run(
 mod tests {
     use super::*;
     use crate::agent::executor::{Action, ActionExecutor};
-    use crate::agent::model::{GenerateRequest, ModelBackend, ModelOutput};
+    use crate::agent::model::{BackendError, GenerateRequest, ModelBackend, ModelOutput};
     use crate::agent::router::Backend;
     use crate::agent::RouteHints;
 
@@ -72,11 +73,12 @@ mod tests {
             &mut self,
             _req: &GenerateRequest,
             _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
-        ) -> Result<ModelOutput, String> {
+        ) -> Result<ModelOutput, BackendError> {
             Ok(ModelOutput {
                 text: self.text.clone(),
                 tool_calls: vec![],
                 usage: None,
+                warnings: vec![],
             })
         }
         fn backend(&self) -> Backend {

@@ -1,11 +1,16 @@
 package com.yaya.ai
 
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -22,6 +27,29 @@ class MainActivity : FlutterActivity() {
     private lateinit var agentHost: AgentHost
     private var agentEventSink: EventChannel.EventSink? = null
     private var agentTaskThread: Thread? = null
+
+    // 网络信号（commit 2）：连接丢失/恢复 → Rust core 路由避开/流中止。
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    // 省电模式信号（commit 2）：置位时 core 跳过金丝雀等额外请求。
+    private val powerSaveReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+            if (::agentHost.isInitialized) agentHost.setPowerSave(pm.isPowerSaveMode)
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        // 回前台：清除后台信号（任务可在下次 run 时继续）。
+        if (::agentHost.isInitialized) agentHost.setAppBackground(false)
+    }
+
+    override fun onStop() {
+        // 切后台：置位后 Rust 侧不再发起新的模型生成（SSE 无法真正暂停）。
+        if (::agentHost.isInitialized) agentHost.setAppBackground(true)
+        super.onStop()
+    }
 
     // Android 13+ notify 工具需运行时权限：首次启动请求一次，用户拒绝则工具显式报错。
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -258,6 +286,58 @@ class MainActivity : FlutterActivity() {
 
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, MODEL_CHANNEL)
             .setStreamHandler(ModelStreamHandler())
+
+        registerSignals()
+    }
+
+    /** 注册环境信号（commit 2）：网络变化 + 省电模式，只传信号，决策在 Rust core。 */
+    private fun registerSignals() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (cm != null) {
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onLost(network: Network) {
+                    if (::agentHost.isInitialized) agentHost.setNetworkLost(true)
+                }
+
+                override fun onAvailable(network: Network) {
+                    // 网络恢复：不预连，仅清除信号，等下一个真实请求触发。
+                    if (::agentHost.isInitialized) agentHost.setNetworkLost(false)
+                }
+            }
+            try {
+                cm.registerNetworkCallback(
+                    NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build(),
+                    cb,
+                )
+                networkCallback = cb
+            } catch (_: Exception) {
+            }
+        }
+        // 初始状态：无网络/省电模式在启动时即上报。
+        if (::agentHost.isInitialized) {
+            agentHost.setNetworkLost(!isNetworkAvailable())
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            agentHost.setPowerSave(pm?.isPowerSaveMode == true)
+        }
+        try {
+            registerReceiver(powerSaveReceiver, IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED))
+        } catch (_: Exception) {
+        }
+    }
+
+    override fun onDestroy() {
+        networkCallback?.let { cb ->
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)
+                ?.unregisterNetworkCallback(cb)
+        }
+        networkCallback = null
+        try {
+            unregisterReceiver(powerSaveReceiver)
+        } catch (_: Exception) {
+        }
+        super.onDestroy()
     }
 
     private fun isNetworkAvailable(): Boolean {

@@ -60,6 +60,7 @@ pub fn run_subagent(
         mcp_tool_allowlist: parent_cfg.mcp_tool_allowlist.clone(),
         capabilities: parent_cfg.capabilities,
         canary: false,
+        degrade_state: parent_cfg.degrade_state.clone(),
     };
     match run_loop(core, task, &sub_cfg, on_event) {
         Ok(text) => (true, text),
