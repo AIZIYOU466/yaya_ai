@@ -71,7 +71,7 @@ private sealed interface FsDialog {
 /** 文件浏览页（ROADMAP 任务 22 迁移）：缩进树形目录，按需展开加载。 */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun FilesScreen(onOpenFile: (String) -> Unit = {}) {
+fun FilesScreen(onOpenFile: (String) -> Unit = {}, onOpenGit: () -> Unit = {}) {
     val api = LocalAgentApi.current
     val scope = rememberCoroutineScope()
     val snackbar = LocalSnackbar.current
@@ -136,7 +136,7 @@ fun FilesScreen(onOpenFile: (String) -> Unit = {}) {
                     )
                 }
             }
-            IconButton(onClick = { /* P3 Git 页 */ }) {
+            IconButton(onClick = onOpenGit) {
                 Icon(Icons.Filled.AccountTree, contentDescription = "Git 版本管理")
             }
             IconButton(onClick = { if (!loading) refresh() }) {

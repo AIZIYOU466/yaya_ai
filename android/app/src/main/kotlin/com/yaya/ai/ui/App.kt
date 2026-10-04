@@ -1,5 +1,6 @@
 package com.yaya.ai.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -9,7 +10,9 @@ import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -29,6 +32,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import com.yaya.ai.AgentApi
 import com.yaya.ai.MainActivity
 
@@ -67,6 +71,7 @@ fun App() {
     ) {
         YayaiTheme {
             var tab by rememberSaveable { mutableStateOf(0) }
+            var gitOpen by rememberSaveable { mutableStateOf(false) }
             Scaffold(
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 bottomBar = {
@@ -108,9 +113,21 @@ fun App() {
                     when (tab) {
                         0 -> PlaceholderScreen("聊天页（迁移中：P3 落地）")
                         1 -> TerminalScreen()
-                        2 -> FilesScreen()
+                        2 -> FilesScreen(onOpenGit = { gitOpen = true })
                         3 -> McpScreen()
                         else -> SettingsScreen()
+                    }
+                    // Git 全屏覆盖（由文件页的 Git 按钮进入）
+                    if (gitOpen) {
+                        Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0A0E14))) {
+                            GitScreen()
+                            IconButton(
+                                onClick = { gitOpen = false },
+                                modifier = Modifier.align(androidx.compose.ui.Alignment.TopEnd).padding(8.dp),
+                            ) {
+                                Icon(Icons.Filled.Close, contentDescription = "关闭 Git")
+                            }
+                        }
                     }
                 }
             }
