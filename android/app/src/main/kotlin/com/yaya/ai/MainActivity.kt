@@ -11,33 +11,108 @@ import android.net.NetworkRequest
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
-import io.flutter.embedding.android.FlutterActivity
-import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.EventChannel
-import io.flutter.plugin.common.MethodChannel
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.callbackFlow
 import org.json.JSONArray
 import org.json.JSONObject
+import com.yaya.ai.ui.App
 
-class MainActivity : FlutterActivity() {
-    private val AGENT_CHANNEL = "com.yaya.ai/agent"
-    private val AGENT_EVENTS = "com.yaya.ai/agent/events"
-    private val MODEL_CHANNEL = "com.yaya.ai/model"
+/**
+ * UI 层 ↔ 执行层接口（迁移自 Flutter Platform Channel，AGENTS.md R5）。
+ *
+ * Compose UI 经此接口调用 Kotlin 执行层；Agent 事件流经 [events]（Rust Core
+ * 的 Event JSON），终端命令输出经 [executeCommand] 的 Flow。所有方法都是
+ * 原 MethodChannel 同名分发的直接映射，语义与 Flutter 时代完全一致。
+ */
+interface AgentApi {
+    /** Agent 事件流（每项为事件 JSON，协议见 core/src/agent/events.rs）。 */
+    val events: Flow<String>
+
+    /** 启动一次 Agent 任务（后台线程运行，事件经 [events] 回推）。 */
+    fun startAgent(taskId: String, prompt: String, configJson: String): Boolean
+    fun stopAgent()
+
+    /** 回传用户对一次授权请求的选择（见事件 `approval_request`）。 */
+    fun respondApproval(id: String, allow: Boolean)
+
+    /** 最近会话 `{sessionId,title,messages:[...]}`；无会话返回 null。 */
+    fun loadRecentSession(): String?
+
+    /** 所有会话列表 `[{id,title,updatedAt,messageCount}]`，新 → 旧。 */
+    fun listSessions(): String
+
+    /** 指定会话 `{sessionId,title,messages}`；不存在返回 null。 */
+    fun loadSession(sessionId: String): String?
+
+    fun renameSession(sessionId: String, title: String)
+    fun deleteSession(sessionId: String)
+
+    /** 会话检查点列表 `[{messages:[...]}]`，新 → 旧。 */
+    fun checkpoints(sessionId: String): String
+
+    /** 全局统计 `{sessions,messages,toolCalls,errors,totalTokens,checkpoints}`。 */
+    fun getStats(): String
+
+    // ── 工作区文件（JSON 返回，见 WorkspaceFileAccess）──
+    fun workspaceRoot(): String
+    fun workspaceList(path: String): String
+    fun workspaceRead(path: String): String
+    fun workspaceWrite(path: String, content: String, overwrite: Boolean): String
+    fun workspaceDelete(path: String): String
+
+    // ── Git（经 proot 容器对 /workspace 执行，见 GitHost）──
+    fun gitRun(subargs: List<String>, timeoutMs: Long): String
+    fun gitDetect(): String
+
+    // ── 环境与根fs ──
+    fun localAvailable(): Boolean
+    fun networkAvailable(): Boolean
+    fun rootfsInstalled(): Boolean
+    fun rootfsProfiles(): String
+    fun currentRootfs(): String
+    fun installRootfs(id: String): String
+    fun setCurrentRootfs(id: String): Boolean
+    fun resetRootfs(id: String): String
+    fun addRootfsProfile(name: String, url: String, sha256: String): String
+    fun removeRootfsProfile(id: String): String
+
+    // ── proot 终端容器 ──
+    fun startContainer(): Boolean
+    fun stopContainer(): Boolean
+    fun containerError(): String?
+
+    /** 在终端容器执行命令，逐行输出；命令结束（EXIT_MARKER）后 Flow 关闭。 */
+    fun executeCommand(command: String): Flow<String>
+
+    // ── 前台服务 ──
+    fun startAgentService()
+    fun stopAgentService()
+}
+
+class MainActivity : ComponentActivity(), AgentApi {
     private val REQUEST_NOTIFICATION_PERMISSION = 1001
 
     private lateinit var agentHost: AgentHost
-    private var agentEventSink: EventChannel.EventSink? = null
     private var agentTaskThread: Thread? = null
 
-    // 网络信号（commit 2）：连接丢失/恢复 → Rust core 路由避开/流中止。
+    // 网络信号：连接丢失/恢复 → Rust core 路由避开/流中止。
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    // 省电模式信号（commit 2）：置位时 core 跳过金丝雀等额外请求。
+    // 省电模式信号：置位时 core 跳过金丝雀等额外请求。
     private val powerSaveReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
             if (::agentHost.isInitialized) agentHost.setPowerSave(pm.isPowerSaveMode)
         }
     }
+
+    /** Agent 事件流：Rust Core 事件 JSON，UI 侧按 events.rs 协议消费。 */
+    private val eventsFlow = MutableSharedFlow<String>(extraBufferCapacity = 512)
+    override val events: Flow<String> get() = eventsFlow
 
     override fun onStart() {
         super.onStart()
@@ -63,234 +138,164 @@ class MainActivity : FlutterActivity() {
                 REQUEST_NOTIFICATION_PERMISSION,
             )
         }
+        agentHost = AgentHost(this) { json -> eventsFlow.tryEmit(json) }
+        registerSignals()
+        setContent { App() }
     }
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
-        permissions: Array<out String>,
+        permissions: Array<String>,
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         // 拒绝时 AgentHost.sendNotification 会在调用方显式报错，无需在此处理。
     }
 
-    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
+    // ── AgentApi 实现（原 MethodChannel 分发，迁移时逐条保留语义）──
 
-        agentHost = AgentHost(this) { json ->
-            runOnUiThread { agentEventSink?.success(json) }
-        }
-
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, AGENT_CHANNEL)
-            .setMethodCallHandler { call, result ->
-                when (call.method) {
-                    "startAgent" -> {
-                        if (agentTaskThread?.isAlive == true) {
-                            result.error("BUSY", "已有任务在运行，请先停止", null)
-                            return@setMethodCallHandler
-                        }
-                        val taskId = call.argument<String>("taskId") ?: "task"
-                        val prompt = call.argument<String>("prompt") ?: ""
-                        val configJson = call.argument<String>("configJson") ?: "{}"
-                        agentTaskThread = Thread {
-                            val resultText = agentHost.run(taskId, prompt, configJson)
-                            // libLoaded=false 等非事件化失败路径：经事件通道送回错误。
-                            if (resultText.startsWith("ERROR:")) {
-                                runOnUiThread {
-                                    agentEventSink?.success(
-                                        JSONObject().apply {
-                                            put("type", "error")
-                                            put("message", resultText.removePrefix("ERROR: "))
-                                        }.toString()
-                                    )
-                                }
-                            }
-                        }.apply {
-                            name = "yaya-agent"
-                            start()
-                        }
-                        result.success(true)
-                    }
-                    "stopAgent" -> {
-                        agentHost.cancel()
-                        agentTaskThread?.interrupt()
-                        agentTaskThread = null
-                        result.success(true)
-                    }
-                    "respondApproval" -> {
-                        val id = call.argument<String>("id") ?: ""
-                        val allow = call.argument<Boolean>("allow") ?: false
-                        agentHost.submitApproval(id, allow)
-                        result.success(true)
-                    }
-                    "loadRecentSession" -> result.success(agentHost.recentSessionJson())
-                    "listSessions" -> result.success(agentHost.sessionsJson())
-                    "loadSession" -> {
-                        val id = call.argument<String>("sessionId") ?: ""
-                        result.success(agentHost.sessionJson(id))
-                    }
-                    "renameSession" -> {
-                        val id = call.argument<String>("sessionId") ?: ""
-                        val title = call.argument<String>("title") ?: ""
-                        agentHost.renameSession(id, title)
-                        result.success(true)
-                    }
-                    "deleteSession" -> {
-                        val id = call.argument<String>("sessionId") ?: ""
-                        agentHost.deleteSession(id)
-                        result.success(true)
-                    }
-                    "checkpoints" -> {
-                        val sid = call.argument<String>("sessionId") ?: ""
-                        result.success(agentHost.checkpointsJson(sid))
-                    }
-                    "getStats" -> result.success(agentHost.stats())
-                    "workspaceRoot" -> result.success(agentHost.workspaceRoot())
-                    "workspaceList" -> {
-                        val path = call.argument<String>("path") ?: ""
-                        result.success(agentHost.wsList(path))
-                    }
-                    // 单文件读写走后台线程：read 上限 10MB，主线程读会冻结 UI。
-                    "workspaceRead" -> {
-                        val path = call.argument<String>("path") ?: ""
-                        Thread {
-                            val msg = agentHost.wsRead(path)
-                            runOnUiThread { result.success(msg) }
-                        }.apply {
-                            name = "yaya-ws-read"
-                            start()
-                        }
-                    }
-                    "workspaceWrite" -> {
-                        val path = call.argument<String>("path") ?: ""
-                        val content = call.argument<String>("content") ?: ""
-                        val overwrite = call.argument<Boolean>("overwrite") ?: true
-                        val req = JSONObject()
-                            .put("path", path)
-                            .put("content", content)
-                            .put("overwrite", overwrite)
-                            .toString()
-                        Thread {
-                            val msg = agentHost.wsWrite(req)
-                            runOnUiThread { result.success(msg) }
-                        }.apply {
-                            name = "yaya-ws-write"
-                            start()
-                        }
-                    }
-                    "workspaceDelete" -> {
-                        val path = call.argument<String>("path") ?: ""
-                        result.success(agentHost.wsDelete(path))
-                    }
-                    // Git 版本管理（ROADMAP 任务 23）：经 proot 容器对 /workspace 执行 git。
-                    "gitRun" -> {
-                        val subargs = call.argument<List<String>>("subargs") ?: emptyList()
-                        val timeout = call.argument<Number>("timeoutMs")?.toLong() ?: 30000L
-                        val arr = JSONArray()
-                        for (s in subargs) arr.put(s)
-                        Thread {
-                            val msg = GitHost.run(this, arr.toString(), timeout)
-                            runOnUiThread { result.success(msg) }
-                        }.apply {
-                            name = "yaya-git-run"
-                            start()
-                        }
-                    }
-                    "gitDetect" -> result.success(GitHost.detect(this))
-                    "localAvailable" -> result.success(agentHost.localAvailable())
-                    "networkAvailable" -> result.success(isNetworkAvailable())
-                    "rootfsInstalled" -> result.success(RootfsInstaller.isInstalledCurrent(this))
-                    "rootfsProfiles" -> {
-                        val arr = JSONArray()
-                        for (p in RootfsInstaller.profiles(this)) {
-                            arr.put(
-                                JSONObject().apply {
-                                    put("id", p.id)
-                                    put("name", p.name)
-                                    put("url", p.url)
-                                    put("sha256", p.sha256)
-                                    put("note", p.note)
-                                    put("builtin", p.builtin)
-                                    put("installed", RootfsInstaller.isInstalled(this@MainActivity, p.id))
-                                }
-                            )
-                        }
-                        result.success(arr.toString())
-                    }
-                    "currentRootfs" -> result.success(RootfsInstaller.currentId(this))
-                    "installRootfs" -> {
-                        val id = call.argument<String>("id") ?: RootfsInstaller.currentId(this)
-                        Thread {
-                            val msg = RootfsInstaller.install(this, id)
-                            runOnUiThread { result.success(msg) }
-                        }.apply {
-                            name = "yaya-rootfs-install"
-                            start()
-                        }
-                    }
-                    "setCurrentRootfs" -> {
-                        val id = call.argument<String>("id") ?: ""
-                        RootfsInstaller.setCurrent(this, id)
-                        result.success(true)
-                    }
-                    "resetRootfs" -> {
-                        val id = call.argument<String>("id") ?: ""
-                        result.success(RootfsInstaller.reset(this, id))
-                    }
-                    "addRootfsProfile" -> {
-                        val name = call.argument<String>("name") ?: ""
-                        val url = call.argument<String>("url") ?: ""
-                        val sha256 = call.argument<String>("sha256") ?: ""
-                        result.success(RootfsInstaller.addCustom(this, name, url, sha256))
-                    }
-                    "removeRootfsProfile" -> {
-                        val id = call.argument<String>("id") ?: ""
-                        result.success(RootfsInstaller.removeCustom(this, id))
-                    }
-                    "startContainer" -> {
-                        val ok = try {
-                            ProotManager.start(this)
-                        } catch (e: Exception) {
-                            ProotManager.lastError = e.message ?: e.toString()
-                            false
-                        }
-                        result.success(ok)
-                    }
-                    "containerError" -> result.success(ProotManager.lastError)
-                    "stopContainer" -> {
-                        ProotManager.stop()
-                        result.success(true)
-                    }
-                    "startAgentService" -> {
-                        AgentForegroundService.start(this)
-                        result.success(true)
-                    }
-                    "stopAgentService" -> {
-                        AgentForegroundService.stop(this)
-                        result.success(true)
-                    }
-                    else -> result.notImplemented()
-                }
+    override fun startAgent(taskId: String, prompt: String, configJson: String): Boolean {
+        if (agentTaskThread?.isAlive == true) return false // 已有任务在运行
+        agentTaskThread = Thread {
+            val resultText = agentHost.run(taskId, prompt, configJson)
+            // libLoaded=false 等非事件化失败路径：经事件通道送回错误。
+            if (resultText.startsWith("ERROR:")) {
+                eventsFlow.tryEmit(
+                    JSONObject().apply {
+                        put("type", "error")
+                        put("message", resultText.removePrefix("ERROR: "))
+                    }.toString()
+                )
             }
-
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, AGENT_EVENTS)
-            .setStreamHandler(object : EventChannel.StreamHandler {
-                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                    agentEventSink = events
-                }
-
-                override fun onCancel(arguments: Any?) {
-                    agentEventSink = null
-                }
-            })
-
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, MODEL_CHANNEL)
-            .setStreamHandler(ModelStreamHandler())
-
-        registerSignals()
+        }.apply {
+            name = "yaya-agent"
+            start()
+        }
+        return true
     }
 
-    /** 注册环境信号（commit 2）：网络变化 + 省电模式，只传信号，决策在 Rust core。 */
+    override fun stopAgent() {
+        agentHost.cancel()
+        agentTaskThread?.interrupt()
+        agentTaskThread = null
+    }
+
+    override fun respondApproval(id: String, allow: Boolean) {
+        agentHost.submitApproval(id, allow)
+    }
+
+    override fun loadRecentSession(): String? = agentHost.recentSessionJson()
+    override fun listSessions(): String = agentHost.sessionsJson()
+    override fun loadSession(sessionId: String): String? = agentHost.sessionJson(sessionId)
+    override fun renameSession(sessionId: String, title: String) {
+        agentHost.renameSession(sessionId, title)
+    }
+    override fun deleteSession(sessionId: String) {
+        agentHost.deleteSession(sessionId)
+    }
+    override fun checkpoints(sessionId: String): String = agentHost.checkpointsJson(sessionId)
+    override fun getStats(): String = agentHost.stats()
+
+    // ── 工作区文件 ——
+
+    override fun workspaceRoot(): String = agentHost.workspaceRoot()
+    override fun workspaceList(path: String): String = agentHost.wsList(path)
+    override fun workspaceRead(path: String): String = agentHost.wsRead(path)
+    override fun workspaceWrite(path: String, content: String, overwrite: Boolean): String {
+        val req = JSONObject()
+            .put("path", path)
+            .put("content", content)
+            .put("overwrite", overwrite)
+            .toString()
+        return agentHost.wsWrite(req)
+    }
+    override fun workspaceDelete(path: String): String = agentHost.wsDelete(path)
+
+    // ── Git ──
+
+    override fun gitRun(subargs: List<String>, timeoutMs: Long): String {
+        val arr = JSONArray()
+        for (s in subargs) arr.put(s)
+        return GitHost.run(this, arr.toString(), timeoutMs)
+    }
+    override fun gitDetect(): String = GitHost.detect(this)
+
+    // ── 环境与根fs ──
+
+    override fun localAvailable(): Boolean = agentHost.localAvailable()
+    override fun networkAvailable(): Boolean = isNetworkAvailable()
+    override fun rootfsInstalled(): Boolean = RootfsInstaller.isInstalledCurrent(this)
+    override fun rootfsProfiles(): String {
+        val arr = JSONArray()
+        for (p in RootfsInstaller.profiles(this)) {
+            arr.put(
+                JSONObject().apply {
+                    put("id", p.id)
+                    put("name", p.name)
+                    put("url", p.url)
+                    put("sha256", p.sha256)
+                    put("note", p.note)
+                    put("builtin", p.builtin)
+                    put("installed", RootfsInstaller.isInstalled(this@MainActivity, p.id))
+                }
+            )
+        }
+        return arr.toString()
+    }
+    override fun currentRootfs(): String = RootfsInstaller.currentId(this)
+    override fun installRootfs(id: String): String = RootfsInstaller.install(this, id)
+    override fun setCurrentRootfs(id: String): Boolean {
+        RootfsInstaller.setCurrent(this, id)
+        return true
+    }
+    override fun resetRootfs(id: String): String = RootfsInstaller.reset(this, id)
+    override fun addRootfsProfile(name: String, url: String, sha256: String): String =
+        RootfsInstaller.addCustom(this, name, url, sha256)
+    override fun removeRootfsProfile(id: String): String = RootfsInstaller.removeCustom(this, id)
+
+    // ── proot 终端 ──
+
+    override fun startContainer(): Boolean {
+        return try {
+            ProotManager.start(this)
+        } catch (e: Exception) {
+            ProotManager.lastError = e.message ?: e.toString()
+            false
+        }
+    }
+    override fun stopContainer(): Boolean {
+        ProotManager.stop()
+        return true
+    }
+    override fun containerError(): String? = ProotManager.lastError
+
+    override fun executeCommand(command: String): Flow<String> = callbackFlow {
+        ProotManager.setLineListener { line ->
+            if (line.startsWith(ProotManager.EXIT_MARKER)) {
+                ProotManager.setLineListener(null)
+                close()
+            } else {
+                trySend(line)
+            }
+        }
+        ProotManager.executeCommand(command)
+        awaitClose {
+            ProotManager.stopCommand()
+            ProotManager.setLineListener(null)
+        }
+    }
+
+    // ── 前台服务 ──
+
+    override fun startAgentService() {
+        AgentForegroundService.start(this)
+    }
+    override fun stopAgentService() {
+        AgentForegroundService.stop(this)
+    }
+
+    // ── 环境信号注册（只传信号，决策在 Rust core）──
+
     private fun registerSignals() {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         if (cm != null) {

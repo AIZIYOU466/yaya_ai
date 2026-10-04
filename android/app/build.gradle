@@ -1,14 +1,13 @@
 plugins {
     id "com.android.application"
     id "kotlin-android"
-    id "dev.flutter.flutter-gradle-plugin"
 }
 
 def llamaFull = project.findProperty("enableLlamaCpp")?.toString() == "true"
 
 android {
     namespace "com.yaya.ai"
-    compileSdkVersion 34
+    compileSdk 34
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -19,10 +18,19 @@ android {
         jvmTarget = "17"
     }
 
+    buildFeatures {
+        compose = true
+    }
+
+    composeOptions {
+        // 与 Kotlin 1.9.24 匹配的 Compose 编译器版本
+        kotlinCompilerExtensionVersion = "1.5.14"
+    }
+
     defaultConfig {
         applicationId "com.yaya.ai"
-        minSdkVersion 24
-        targetSdkVersion 34
+        minSdk 24
+        targetSdk 34
         versionCode 1
         versionName "1.0.0"
         // 与 scripts/build-android.sh 产出的 ABI 对齐，避免出现部分 native 库缺失的切片。
@@ -112,6 +120,17 @@ tasks.matching { it.name.toLowerCase().contains("nativelibs") }.configureEach {
     dependsOn("buildRustCore")
 }
 
-flutter {
-    source "../.."
+dependencies {
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation(platform("androidx.compose:compose-bom:2024.05.00"))
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.activity:activity-compose:1.9.0")
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.2")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2")
+    implementation("org.json:json:20240303")
+    debugImplementation("androidx.compose.ui:ui-tooling")
 }
