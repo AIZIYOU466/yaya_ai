@@ -112,7 +112,7 @@ fun App() {
             ) { padding ->
                 Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                     when (tab) {
-                        0 -> PlaceholderScreen("聊天页（迁移中：P3 落地）")
+                        0 -> ChatScreen()
                         1 -> TerminalScreen()
                         2 -> FilesScreen(onOpenFile = { editorPath = it }, onOpenGit = { gitOpen = true })
                         3 -> McpScreen()
