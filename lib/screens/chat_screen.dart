@@ -24,6 +24,21 @@ class _Item {
   bool get isPolicy => role == 'policy';
 }
 
+/// 会话列表项（多会话管理，任务 24）。
+class _Session {
+  _Session({
+    required this.id,
+    required this.title,
+    required this.updatedAt,
+    required this.messageCount,
+  });
+
+  final String id;
+  final String title;
+  final int updatedAt;
+  final int messageCount;
+}
+
 class ChatScreen extends ConsumerStatefulWidget {
   const ChatScreen({super.key});
 
@@ -278,6 +293,251 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
     }
   }
 
+  /// 会话管理弹层：新建 / 切换 / 重命名 / 删除（多会话，任务 24）。
+  Future<void> _showSessions() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (_) => StatefulBuilder(
+        builder: (_, __) {
+          return FutureBuilder<String>(
+            future: AgentChannel.listSessions(),
+            builder: (ctx, snap) {
+              final sessions = <_Session>[];
+              if (snap.hasData) {
+                try {
+                  for (final m in jsonDecode(snap.data!) as List) {
+                    final s = m as Map<String, dynamic>;
+                    sessions.add(_Session(
+                      id: s['id'] as String? ?? '',
+                      title: s['title'] as String? ?? '',
+                      updatedAt: (s['updatedAt'] as num?)?.toInt() ?? 0,
+                      messageCount: (s['messageCount'] as num?)?.toInt() ?? 0,
+                    ));
+                  }
+                } catch (_) {}
+              }
+              return SafeArea(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 8, 8, 4),
+                      child: Row(
+                        children: [
+                          const Expanded(
+                            child: Text('会话', style: TextStyle(fontWeight: FontWeight.bold)),
+                          ),
+                          TextButton.icon(
+                            onPressed: () {
+                              Navigator.pop(ctx);
+                              _newSession();
+                            },
+                            icon: const Icon(Icons.add),
+                            label: const Text('新建'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Flexible(
+                      child: sessions.isEmpty
+                          ? const Padding(
+                              padding: EdgeInsets.all(24),
+                              child: Text('暂无会话'),
+                            )
+                          : ListView.builder(
+                              shrinkWrap: true,
+                              itemCount: sessions.length,
+                              itemBuilder: (ctx, i) {
+                                final s = sessions[i];
+                                final isCurrent = s.id == _sessionId;
+                                return ListTile(
+                                  dense: true,
+                                  selected: isCurrent,
+                                  leading: Icon(
+                                    isCurrent ? Icons.article : Icons.chat_bubble_outline,
+                                  ),
+                                  title: Text(
+                                    s.title.isEmpty ? '未命名会话' : s.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                  subtitle: Text(
+                                    '${s.messageCount} 条消息 · ${_formatTime(s.updatedAt)}',
+                                  ),
+                                  onTap: () {
+                                    Navigator.pop(ctx);
+                                    _switchTo(s.id);
+                                  },
+                                  trailing: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      IconButton(
+                                        icon: const Icon(Icons.edit_outlined, size: 18),
+                                        tooltip: '重命名',
+                                        onPressed: () {
+                                          Navigator.pop(ctx);
+                                          _renameSession(s.id, s.title);
+                                        },
+                                      ),
+                                      IconButton(
+                                        icon: const Icon(Icons.delete_outline, size: 18),
+                                        tooltip: '删除',
+                                        onPressed: () {
+                                          Navigator.pop(ctx);
+                                          _deleteSession(s.id);
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  void _newSession() {
+    if (_running) {
+      _toast('任务运行中，无法新建会话');
+      return;
+    }
+    setState(() {
+      _sessionId = '';
+      _items.clear();
+      _historyCount = 0;
+      _totalTokens = 0;
+      _status = '';
+    });
+  }
+
+  Future<void> _switchTo(String id) async {
+    if (id == _sessionId) return;
+    setState(() {
+      _items.clear();
+      _historyCount = 0;
+      _totalTokens = 0;
+      _status = '';
+    });
+    await _loadHistory(id);
+  }
+
+  /// 加载指定会话历史（并设为当前会话）。
+  Future<void> _loadHistory(String id) async {
+    try {
+      final raw = await AgentChannel.loadSession(id);
+      if (raw == null || raw.isEmpty || !mounted) return;
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      setState(() => _sessionId = data['sessionId'] as String? ?? id);
+      final messages = data['messages'] as List? ?? [];
+      setState(() {
+        _items.clear();
+        for (final m in messages) {
+          final role = m['role'] as String? ?? '';
+          final text = m['text'] as String? ?? '';
+          final ok = m['ok'] as bool? ?? true;
+          if (role == 'usage') continue;
+          if (role == 'policy') {
+            _items.add(_Item(role: 'policy', text: text, ok: true));
+            continue;
+          }
+          if (text.isEmpty) continue;
+          if (role == 'assistant' &&
+              _items.isNotEmpty &&
+              _items.last.role == 'assistant') {
+            _items.last.text += text;
+          } else {
+            _items.add(_Item(role: role, text: text, ok: ok));
+          }
+        }
+        _historyCount = _items.length;
+      });
+      _scrollToBottom();
+    } catch (_) {
+      // 加载失败不阻断。
+    }
+  }
+
+  Future<void> _renameSession(String id, String oldTitle) async {
+    final c = TextEditingController(text: oldTitle);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名会话'),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('确定')),
+        ],
+      ),
+    );
+    if (name == null || name.isEmpty) return;
+    await AgentChannel.renameSession(id, name);
+  }
+
+  Future<void> _deleteSession(String id) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除会话'),
+        content: const Text('删除后该会话的所有消息与检查点将不可恢复。'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('删除', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await AgentChannel.deleteSession(id);
+    // 删除的是当前会话：清空后加载最近会话；否则什么都不用做。
+    if (id == _sessionId) {
+      setState(() {
+        _sessionId = '';
+        _items.clear();
+        _historyCount = 0;
+        _totalTokens = 0;
+        _status = '';
+      });
+      final raw = await AgentChannel.loadRecentSession();
+      if (raw != null && raw.isNotEmpty && mounted) {
+        final data = jsonDecode(raw) as Map<String, dynamic>;
+        final newId = data['sessionId'] as String? ?? '';
+        if (newId.isNotEmpty && newId != id) {
+          await _loadHistory(newId);
+        }
+      }
+    }
+  }
+
+  String _formatTime(int millis) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(millis);
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 1) return '刚刚';
+    if (diff.inHours < 1) return '${diff.inMinutes} 分钟前';
+    if (diff.inDays < 1) return '${diff.inHours} 小时前';
+    if (diff.inDays < 7) return '${diff.inDays} 天前';
+    return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+  }
+
+  void _toast(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
   /// 回滚到检查点：用该快照替换当前对话展示，后续消息作为新任务继续。
   Future<void> _showCheckpoints() async {
     if (_sessionId.isEmpty) return;
@@ -432,6 +692,11 @@ class _ChatScreenState extends ConsumerState<ChatScreen> {
       appBar: AppBar(
         title: Text(_running ? 'YAYai · $_status' : 'YAYai'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.forum_outlined),
+            tooltip: '会话',
+            onPressed: _running ? null : _showSessions,
+          ),
           IconButton(
             icon: const Icon(Icons.analytics_outlined),
             tooltip: 'Stats',

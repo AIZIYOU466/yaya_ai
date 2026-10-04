@@ -159,12 +159,11 @@ yaya_ai 已是「内核 + 聊天壳」。阶段 3 的目标是补齐 IDE 型客�
   - 依赖：任务 22（复用 file 工具工作区语义；diff 为文本展示，未复用编辑器）
   - 验收：用户可在 App 内可视化管理 Git，不依赖终端敲命令（已达成，Dart/Kotlin 未真机验证）
 
-- [ ] **24. 多会话管理**
-  - 参考：AiCode `guide/chat.md` 侧边栏会话页
-  - 涉及：`lib/screens/chat_screen.dart`（侧边栏会话列表）；`AgentDatabase`（已有 sessions 表，补查询接口）；`AgentChannel`（切换/删除/重命名会话）
-  - 功能：按时间分组、置顶、重命名、删除、切换；侧边栏同时承载会话页与文件页（任务 22）
-  - 依赖：任务 22（侧边栏复用）
-  - 验收：用户可管理多个会话并在其间切换，进程重启后恢复
+- [x] **24. 多会话管理**
+  - 参考：AiCode `guide/chat.md` 会话列表
+  - 实现：`AgentDatabase` 新增 `sessionsJson`（按 updated_at 倒序 + 消息数）/`renameSession`/`deleteSession`（级联消息+检查点）/`sessionJson`（指定会话）；`AgentHost`/`MainActivity`/`AgentChannel` 新增 listSessions/loadSession/renameSession/deleteSession 通道；`lib/screens/chat_screen.dart` AppBar 加会话按钮，底部弹层会话列表（新建/切换/重命名/删除，当前会话高亮，删除当前后自动加载最近会话）
+  - 备注：yaya_ai 为底部导航架构，会话列表用底部弹层承载（AiCode 的侧边栏方案不适用）；未做置顶与按时间分组
+  - 验收：用户可管理多个会话并在其间切换，进程重启后恢复最近会话（已达成，Dart/Kotlin 未真机验证）
 
 ### Phase 3B：模型与多模态（P0）
 

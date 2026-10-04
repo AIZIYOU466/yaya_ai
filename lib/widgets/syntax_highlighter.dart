@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 
 /// 按文件扩展名推断的语言标识（零依赖，ROADMAP 任务 22）。
+///
+/// Dart 正则不支持命名捕获组（`(?<name>...)`）也不允许类内嵌类，
+/// 因此这里全部用普通捕获组（数字索引）区分 token，`_MdLine` 为顶层类。
 enum Lang {
   dart,
   kotlin,
@@ -47,7 +50,6 @@ Lang langFromPath(String path) {
     case 'zsh':
     case 'fish':
     case 'ksh':
-    case 'makefile':
       return Lang.shell;
     case 'rs':
       return Lang.rust;
@@ -163,9 +165,15 @@ class _Palette {
   );
 }
 
+/// Markdown 一行解析结果（顶层类；Dart 不允许类内嵌类）。
+class _MdLine {
+  const _MdLine(this.span, this.inCode);
+  final InlineSpan span;
+  final bool inCode;
+}
+
 /// 纯 Dart 语法高亮器：把纯文本渲染成带样式的 [TextSpan]。
-///
-/// 逐行/逐 token 扫描，不依赖第三方库（项目惯例：零依赖方案风险最低）。
+/// 零依赖（项目惯例：零依赖方案风险最低）。仅预览模式使用。
 class SyntaxHighlighter {
   const SyntaxHighlighter(this.lang);
 
@@ -194,14 +202,12 @@ class SyntaxHighlighter {
     }
   }
 
-  /// 按语言构造正则（注释风格各异）；结果按语言缓存，避免重复编译。
   static final Map<Lang, RegExp> _codeReCache = {};
 
+  /// 组合正则：group 1=注释、2=字符串、3=数字、4=标识符。结果按语言缓存。
   static RegExp _codeRegex(Lang lang) => _codeReCache.putIfAbsent(lang, () {
     final String comment;
-    if (lang == Lang.python) {
-      comment = r'#[^\n]*|"""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'';
-    } else if (lang == Lang.shell || lang == Lang.yaml) {
+    if (lang == Lang.python || lang == Lang.shell || lang == Lang.yaml) {
       comment = r'#[^\n]*';
     } else if (lang == Lang.c) {
       comment = r'^\s*#\s*[\w.]+[^\n]*|//[^\n]*|/\*[\s\S]*?\*/';
@@ -209,23 +215,24 @@ class SyntaxHighlighter {
       comment = r'//[^\n]*|/\*[\s\S]*?\*/';
     }
     return RegExp(
-      '(?<comment>$comment)'
-      r'|(?<string>"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)'
-      r'|(?<number>\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?\b|\b0x[0-9a-fA-F]+\b)'
-      r'|(?<ident>[A-Za-z_][A-Za-z0-9_]*)',
+      '($comment)'
+      r'|("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\])*`)'
+      r'|(\b\d[\d_]*(?:\.\d+)?(?:[eE][+-]?\d+)?\b|\b0x[0-9a-fA-F]+\b)'
+      r'|([A-Za-z_][A-Za-z0-9_]*)',
       multiLine: true,
     );
   });
 
   TextSpan _code(String text, TextStyle base, _Palette p) {
+    final re = _codeRegex(lang);
     final spans = <InlineSpan>[];
     var last = 0;
-    for (final m in _codeRegex(lang).allMatches(text)) {
+    for (final m in re.allMatches(text)) {
       if (m.start > last) {
         spans.add(TextSpan(text: text.substring(last, m.start), style: base));
       }
-      final style = _classifyCode(m, text, base, p);
-      if (style == null) continue; // 普通标识符并入相邻纯文本，减少 span 数
+      final style = _codeStyle(m, text, base, p);
+      if (style == null) continue; // 普通标识符并入相邻纯文本
       spans.add(TextSpan(text: text.substring(m.start, m.end), style: style));
       last = m.end;
     }
@@ -235,12 +242,11 @@ class SyntaxHighlighter {
     return TextSpan(children: spans);
   }
 
-  TextStyle? _classifyCode(Match m, String text, TextStyle base, _Palette p) {
-    final g = m.namedGroup;
-    if (g('comment') != null) return base.copyWith(color: p.comment);
-    if (g('string') != null) return base.copyWith(color: p.string);
-    if (g('number') != null) return base.copyWith(color: p.number);
-    if (g('ident') == null) return null;
+  TextStyle? _codeStyle(Match m, String text, TextStyle base, _Palette p) {
+    if (m.group(1) != null) return base.copyWith(color: p.comment);
+    if (m.group(2) != null) return base.copyWith(color: p.string);
+    if (m.group(3) != null) return base.copyWith(color: p.number);
+    if (m.group(4) == null) return null;
     final s = text.substring(m.start, m.end);
     final kw = _keywords[lang];
     if (kw != null && kw.contains(s)) {
@@ -254,10 +260,11 @@ class SyntaxHighlighter {
     return null;
   }
 
+  // group 1=字符串、2=数字、3=关键字。
   static final _jsonRe = RegExp(
-    r'(?<string>"(?:\\.|[^"\\])*")'
-    r'|(?<number>-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)'
-    r'|(?<keyword>true|false|null)',
+    r'("(?:\\.|[^"\\])*")'
+    r'|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)'
+    r'|(true|false|null)',
   );
 
   TextSpan _json(String text, TextStyle base, _Palette p) {
@@ -267,15 +274,14 @@ class SyntaxHighlighter {
       if (m.start > last) {
         spans.add(TextSpan(text: text.substring(last, m.start), style: base));
       }
-      final g = m.namedGroup;
       final s = text.substring(m.start, m.end);
       TextStyle? style;
-      if (g('string') != null) {
+      if (m.group(1) != null) {
         // 后跟 ':' 的是 key，用类型色；否则是字符串值。
         style = text.substring(m.end).trimLeft().startsWith(':')
             ? base.copyWith(color: p.type)
             : base.copyWith(color: p.string);
-      } else if (g('number') != null) {
+      } else if (m.group(2) != null) {
         style = base.copyWith(color: p.number);
       } else {
         style = base.copyWith(color: p.keyword, fontWeight: FontWeight.bold);
@@ -289,11 +295,12 @@ class SyntaxHighlighter {
     return TextSpan(children: spans);
   }
 
+  // group 1=注释、2=字符串、3=标点、4=名称。
   static final _xmlRe = RegExp(
-    r'(?<comment><!--[\s\S]*?-->)'
-    r'|(?<string>"[^"\n]*"|\'[^\'\n]*\')'
-    r'|(?<punct><|>|/>)'
-    r'|(?<name>[A-Za-z_][\w:.-]*)',
+    r'(<!--[\s\S]*?-->)'
+    r'|("[^"\n]*"|\'[^\'\n]*\')'
+    r'|(<|>|/>)'
+    r'|([A-Za-z_][\w:.-]*)',
   );
 
   TextSpan _xml(String text, TextStyle base, _Palette p) {
@@ -304,14 +311,13 @@ class SyntaxHighlighter {
       if (m.start > last) {
         spans.add(TextSpan(text: text.substring(last, m.start), style: base));
       }
-      final g = m.namedGroup;
       final s = text.substring(m.start, m.end);
       TextStyle style;
-      if (g('comment') != null) {
+      if (m.group(1) != null) {
         style = base.copyWith(color: p.comment);
-      } else if (g('string') != null) {
+      } else if (m.group(2) != null) {
         style = base.copyWith(color: p.string);
-      } else if (g('punct') != null) {
+      } else if (m.group(3) != null) {
         style = base.copyWith(color: p.punct, fontWeight: FontWeight.bold);
         if (s == '<' || s == '</') expectName = true;
       } else if (expectName) {
@@ -334,12 +340,6 @@ class SyntaxHighlighter {
   static final _mdList = RegExp(r'^(\s*)([-*+]|\d+\.)(\s+)(.*)$');
   static final _mdInline = RegExp(r'(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]*\]\([^)\n]*\))');
   static final _mdLink = RegExp(r'^\[([^\]]*)\]\(([^)]*)\)$');
-
-  class _MdLine {
-    const _MdLine(this.span, this.inCode);
-    final InlineSpan span;
-    final bool inCode;
-  }
 
   TextSpan _markdown(String text, TextStyle base, _Palette p) {
     final spans = <InlineSpan>[];
@@ -444,7 +444,7 @@ class SyntaxHighlighter {
     ),
     Lang.kotlin: _set(
       'abstract actual annotation as break by catch companion const constructor continue crossinline '
-      'data do else enum external final finally for fun get if import in infix init inline infix '
+      'data do else enum external final finally for fun get if import in infix init inline '
       'inner interface internal is lateinit noinline null object open operator out override package '
       'private protected public reified return sealed set super suspend tailrec this throw true '
       'false try typealias typeof var val when where while',
@@ -487,7 +487,7 @@ class SyntaxHighlighter {
     Lang.dart: _set('String int double num bool List Map Set Future Stream Widget BuildContext void Object dynamic print'),
     Lang.python: _set('print len range int str float bool list dict tuple set type isinstance issubclass open file input abs max min sum sorted enumerate zip map filter any all repr id hash'),
     Lang.js: _set('console Math JSON Object Array String Number Boolean Promise Map Set Symbol document window fetch require exports'),
-    Lang.rust: _set('String Vec HashMap Option Result Box Rc Arc Cell RefCell Some None Ok Err Ok Err impl trait'),
+    Lang.rust: _set('String Vec HashMap Option Result Box Rc Arc Cell RefCell Some None Ok Err impl trait'),
     Lang.c: _set('printf fprintf sprintf scanf malloc calloc realloc free NULL size_t char int void'),
   };
 

@@ -4,7 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 
 import '../platform/agent_channel.dart';
-import '../widgets/syntax_highlighter.dart';
+import '../widgets/syntax_highlighter.dart' as yh;
 
 /// 代码编辑器（ROADMAP 任务 22）。
 ///
@@ -33,7 +33,7 @@ class _Hist {
 class _EditorScreenState extends State<EditorScreen> {
   late final TextEditingController _ctrl;
   late final FocusNode _focus;
-  late final Lang _lang;
+  late final yh.Lang _lang;
 
   String _lastText = '';
   _Mode _mode = _Mode.edit;
@@ -54,7 +54,7 @@ class _EditorScreenState extends State<EditorScreen> {
   @override
   void initState() {
     super.initState();
-    _lang = langFromPath(widget.path);
+    _lang = yh.langFromPath(widget.path);
     _ctrl = TextEditingController();
     _focus = FocusNode();
     _load();
@@ -79,7 +79,7 @@ class _EditorScreenState extends State<EditorScreen> {
         _ctrl.text = m['content'] as String? ?? '';
         _lastText = _ctrl.text;
         // Markdown 默认进预览，代码默认进编辑。
-        _mode = _lang == Lang.markdown ? _Mode.preview : _Mode.edit;
+        _mode = _lang == yh.Lang.markdown ? _Mode.preview : _Mode.edit;
         if (_ctrl.text.length > 300000) {
           _toast('文件较大（>300KB），编辑/预览可能卡顿');
         }
@@ -118,7 +118,7 @@ class _EditorScreenState extends State<EditorScreen> {
   void _applyHistory(_Hist h) {
     _applyingHistory = true;
     _ctrl.text = h.text;
-    _ctrl.selection = TextSelection.collapsed(offset: h.selection.clamp(0, h.text.length) as int);
+    _ctrl.selection = TextSelection.collapsed(offset: h.selection.clamp(0, h.text.length).toInt());
     _lastText = h.text;
     _applyingHistory = false;
     _dirty = true;
@@ -169,15 +169,15 @@ class _EditorScreenState extends State<EditorScreen> {
         content: const Text('文件已修改但尚未保存。'),
         actions: [
           TextButton(
-            onTap: () => Navigator.pop(ctx, _BackChoice.edit),
+            onPressed: () => Navigator.pop(ctx, _BackChoice.edit),
             child: const Text('继续编辑'),
           ),
           TextButton(
-            onTap: () => Navigator.pop(ctx, _BackChoice.discard),
+            onPressed: () => Navigator.pop(ctx, _BackChoice.discard),
             child: const Text('直接退出', style: TextStyle(color: Colors.grey)),
           ),
           TextButton(
-            onTap: () => Navigator.pop(ctx, _BackChoice.saveAndExit),
+            onPressed: () => Navigator.pop(ctx, _BackChoice.saveAndExit),
             child: const Text('保存并退出'),
           ),
         ],
@@ -195,6 +195,9 @@ class _EditorScreenState extends State<EditorScreen> {
         Navigator.of(context).pop();
         break;
       case _BackChoice.edit:
+        break;
+      case null:
+        // 用户点击外部区域取消，留在编辑器
         break;
     }
   }
@@ -240,13 +243,13 @@ class _EditorScreenState extends State<EditorScreen> {
     final cs = Theme.of(context).colorScheme;
     final dark = Theme.of(context).brightness == Brightness.dark;
     final base = _monoStyle(cs);
-    if (_lang == Lang.markdown) {
+    if (_lang == yh.Lang.markdown) {
       return Padding(
         padding: const EdgeInsets.all(12),
         child: MarkdownWidget(data: _ctrl.text, selectable: true),
       );
     }
-    final span = SyntaxHighlighter(_lang).render(_ctrl.text, base: base, dark: dark);
+    final span = yh.SyntaxHighlighter(_lang).render(_ctrl.text, base: base, dark: dark);
     return SingleChildScrollView(
       padding: const EdgeInsets.all(12),
       child: SelectableText.rich(span),
@@ -315,7 +318,7 @@ class _EditorScreenState extends State<EditorScreen> {
             children: [
               Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
               Text(
-                langLabel(_lang) +
+                yh.langLabel(_lang) +
                     (_dirty ? '  ·  未保存' : '') +
                     (_mode == _Mode.preview ? '  ·  预览' : ''),
                 maxLines: 1,
@@ -329,7 +332,7 @@ class _EditorScreenState extends State<EditorScreen> {
             ],
           ),
           actions: [
-            if (_lang == Lang.markdown)
+            if (_lang == yh.Lang.markdown)
               IconButton(
                 icon: Icon(_mode == _Mode.preview ? Icons.code : Icons.visibility),
                 tooltip: _mode == _Mode.preview ? '编辑' : '预览',

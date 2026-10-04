@@ -292,8 +292,8 @@ class _GitScreenState extends State<GitScreen> {
         title: Text(title),
         content: Text(body),
         actions: [
-          TextButton(onTap: () => Navigator.pop(ctx, false), child: const Text('取消')),
-          TextButton(onTap: () => Navigator.pop(ctx, true), child: const Text('确定')),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('确定')),
         ],
       ),
     );
@@ -313,8 +313,8 @@ class _GitScreenState extends State<GitScreen> {
           onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
         ),
         actions: [
-          TextButton(onTap: () => Navigator.pop(ctx), child: const Text('取消')),
-          TextButton(onTap: () => Navigator.pop(ctx, c.text.trim()), child: const Text('确定')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('确定')),
         ],
       ),
     );
