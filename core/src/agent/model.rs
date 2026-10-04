@@ -242,7 +242,7 @@ impl std::fmt::Display for BackendError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelOutput {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,

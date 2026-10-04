@@ -4,11 +4,11 @@
 //! - Android：经 JNI sink 回调 → Kotlin → Dart
 //! - 桌面：编码进 gRPC `TaskEvent.output`
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::state::TaskState;
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
     State {

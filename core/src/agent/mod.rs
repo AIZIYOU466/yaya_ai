@@ -14,6 +14,7 @@ pub mod memory;
 pub mod model;
 pub mod openai;
 pub mod permission;
+pub mod recorder;
 pub mod router;
 pub mod run;
 pub mod signals;
