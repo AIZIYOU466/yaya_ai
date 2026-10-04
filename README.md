@@ -11,8 +11,8 @@
 ## 架构
 
 ```
-Flutter UI (Dart)
-  │  Platform Channel
+Compose UI (Kotlin)
+  │  进程内直接调用（AgentApi 接口，MainActivity）
   ▼
 Kotlin 执行层
   ├─ 剪贴板 / 本地通知（不依赖无障碍服务）
@@ -48,7 +48,7 @@ Rust Agent Core（crate `yaya-core`，唯一规范源）
 
 **归属原则**：循环机是编排者，属 Core（Rust，唯一实现）；Android 经 JNI 共享；
 平台差异由 `ActionExecutor` / `ModelBackend` / `McpClient` 三个 trait 注入。
-Kotlin/Dart 侧**不得**重复实现循环、路由、工具层或协议解析（防逻辑漂移）。
+Kotlin/Compose 侧**不得**重复实现循环、路由、工具层或协议解析（防逻辑漂移）。
 
 ## 功能
 
@@ -96,7 +96,7 @@ Kotlin/Dart 侧**不得**重复实现循环、路由、工具层或协议解析�
 
 - **文件浏览与代码编辑器**：缩进树形目录浏览工作区（长按新建/重命名/删除）；内置等宽
   编辑器（撤销/重做/保存、快捷符号栏、未保存退出确认），Markdown 渲染预览与代码语法
-  高亮预览（纯 Dart 零依赖）。
+  高亮预览（纯 Kotlin 零依赖）。
 - **Git 版本管理**：状态/分支/提交三标签页，经 proot 容器执行 git（需容器安装 git，
   如 Alpine `apk add git`；工作区已挂载进容器 `/workspace`）。
 - **多会话管理**：新建、切换、重命名、删除；进程重启后恢复最近会话。
@@ -123,15 +123,19 @@ cargo check -p yaya-core-jni --target aarch64-linux-android --no-default-feature
 # 3. 交叉编译 JNI 库 → android/app/src/main/jniLibs/
 ANDROID_NDK_HOME=<ndk 路径> bash scripts/build-android.sh
 
-# 4. 构建 APK（默认 STUB 推理）
-flutter build apk --release
+# 4. 构建 APK（默认 STUB 推理；本地或 CI 均可）
+cd android && ./gradlew assembleDebug   # 调试包
+cd android && ./gradlew assembleRelease  # 发布包（CI 用）
 ```
 
-CI：`.github/workflows/rust-core.yml`（Core 测试）、`.github/workflows/flutter-android.yml`
-（NDK + `scripts/build-android.sh` + APK）。
+CI：`.github/workflows/rust-core.yml`（Core 测试）、`.github/workflows/android-release.yml`
+（Rust 交叉编译 + lint + assembleRelease + APK 上传）。
 
-本容器为 aarch64，而 NDK 仅提供 linux-x86_64 预编译工具链且无 qemu/binfmt，
-**本地无法链接 `.so`**；交叉链接与 `cloud-http`（ring）只能在 x86_64 CI 上验证。
+本容器为 aarch64，NDK 工具链仅 x86_64 二进制无法直接运行；但 `scripts/build-android.sh`
+已双模式化（aarch64 自动切系统 clang + NDK sysroot），本地可产出三 ABI `.so` 与完整 APK——
+该障碍已于 2026-10 突破（详见 AGENTS.md）。全量 llama.cpp（`-PenableLlamaCpp=true`）
+仍需 NDK/cmake 环境（CI 验证）；`cloud-http`（ring）本地链接已验证，对接真实云端的
+运行时行为仍需真机/CI 验证。
 标记 UNVERIFIED 的路径不宣称已验证。
 
 ## 配置

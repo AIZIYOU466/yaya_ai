@@ -7,7 +7,7 @@ YAYai 是运行在 Android 上的 AI Agent 客户端：AI 对话 + 内置 proot 
 ### 文件浏览与代码编辑器
 
 - **文件树**：「文件」tab 展示工作区缩进树形目录，目录在前、文件在后；点目录展开/折叠，点文件打开编辑器；长按可新建文件（可含路径）、重命名、删除（删除不可恢复，会二次确认）。
-- **编辑器**：等宽字体、撤销/重做（最多 100 步）、保存、快捷符号栏（Tab/空格/常用符号）、未保存退出确认；Markdown 默认预览渲染，其余代码文件默认编辑，可切换「预览」查看语法高亮（纯 Dart 零依赖，支持 Dart/Kotlin/Java/Python/JS/JSON/Shell/Rust/C/YAML/XML/Markdown）。
+- **编辑器**：等宽字体、撤销/重做（最多 100 步）、保存、快捷符号栏（Tab/空格/常用符号）、未保存退出确认；Markdown 默认预览渲染，其余代码文件默认编辑，可切换「预览」查看语法高亮（纯 Kotlin 零依赖，支持 Dart/Kotlin/Java/Python/JS/JSON/Shell/Rust/C/YAML/XML/Markdown）。
 
 ### Git 版本管理
 
@@ -115,13 +115,13 @@ cargo check -p yaya-core --features cloud-http
 # Android target 编译检查（无需 NDK）
 cargo check -p yaya-core-jni --target aarch64-linux-android --no-default-features
 
-# 交叉编译 JNI 库 + 构建 APK（需 NDK 与 Flutter）
-ANDROID_NDK_HOME=<ndk> bash scripts/build-android.sh
-flutter build apk --release
+# 交叉编译 JNI 库 + 构建 APK（需 NDK）
+ANDROID_NDK_HOME=<ndk 路径> bash scripts/build-android.sh
+cd android && ./gradlew assembleRelease
 ```
 
-- 端侧推理默认 STUB（不可用），需显式开启 llama.cpp 全量构建。
-- 容器内（aarch64）无法本地链接 .so（NDK 仅提供 x86_64 工具链），交叉链接与云端后端验证在 CI 完成。
+- 端侧推理默认 STUB（不可用），需显式开启 llama.cpp 全量构建（`-PenableLlamaCpp=true`）。
+- `scripts/build-android.sh` 双模式：x86_64 主机用 NDK clang；aarch64 主机自动切系统 clang + NDK sysroot（本地可出完整 APK）。
 
 ### 数据库迁移
 
