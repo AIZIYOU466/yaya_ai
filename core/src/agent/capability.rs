@@ -111,7 +111,7 @@ impl ProbeItem {
     /// 平台实现构造探测请求的要点（core 不发送 HTTP）。
     pub fn request_hint(&self) -> &'static str {
         match self {
-            ProbeItem::MaxContextWindow { probe_max_tokens } => {
+            ProbeItem::MaxContextWindow { .. } => {
                 "单轮 chat/completions：messages 只含一条短 user 消息，max_tokens = \
                  probe_max_tokens，stream=false；读取 usage.completion_tokens 与 finish_reason"
             }
