@@ -151,4 +151,6 @@
 - Android App：`flutter build apk --release`。CI：`.github/workflows/flutter-android.yml`
   （Flutter 3.22.2 / JDK 17 / Gradle 8.7 wrapper 已入库）。
 - 本地工具链不全时，以 CI 结果为准；标记 UNVERIFIED 的路径不得宣称已验证。
-  - **已知**：本容器为 aarch64，而 NDK 仅提供 linux-x86_64 预编译工具链且无 qemu/binfmt，**本地无法链接 `.so`**；交叉链接与 `cloud-http`（ring）只能在 x86_64 CI 上验证。
+  - **已知（已突破 2026-10）**：本容器为 aarch64，NDK 仅提供 linux-x86_64 预编译工具链、二进制无法直接运行；但 NDK sysroot 是跨架构数据，配合系统 clang（apt install clang lld）即可本地交叉链接：
+    `scripts/build-android.sh` 已双模式化（aarch64 主机自动切系统 clang + NDK sysroot，含 crt/libunwind stub 修复），三个 ABI 均本地可产出 `.so` 与完整 APK（`./gradlew assembleDebug`，STUB 模式跳过 CMake——ModelBridge 负载优雅降级）。
+    全量 llama.cpp（`-PenableLlamaCpp=true`）仍需 NDK/cmake 环境（CI 验证）。`cloud-http`（ring）本地产出已验证，但对接真实云端的运行时行为仍需真机/CI 验证。

@@ -39,15 +39,22 @@ android {
         }
         externalNativeBuild {
             cmake {
-                cppFlags "-std=c++17"
-                arguments "-DANDROID_STL=c++_shared", "-DLLAMA_ENABLE=${llamaFull ? 'ON' : 'OFF'}"
+                // llama.cpp 全量推理需 NDK 工具链交叉编译（CI 或本机 llamaFull）；
+                // STUB 模式直接跳过：ModelBridge 对 loadLibrary 失败优雅降级（见 ModelBridge.kt），
+                // 不触发 CMake 也避免了 aarch64 容器无 NDK 可执行工具链的问题。
+                if (llamaFull) {
+                    cppFlags "-std=c++17"
+                    arguments "-DANDROID_STL=c++_shared", "-DLLAMA_ENABLE=ON"
+                }
             }
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            path "src/main/cpp/CMakeLists.txt"
+    if (llamaFull) {
+        externalNativeBuild {
+            cmake {
+                path "src/main/cpp/CMakeLists.txt"
+            }
         }
     }
 
