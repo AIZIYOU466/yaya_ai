@@ -439,7 +439,7 @@ private fun TreeNode(
 
 @Composable
 private fun NodeIcon(node: FsNode) {
-    val lang = langFromPath(node.path)
+    val lang = SyntaxHighlighter.langFromPath(node.path)
     val (icon, color) = if (node.isDir) {
         (if (node.expanded) Icons.Filled.FolderOpen else Icons.Filled.Folder) to Color(0xFF42A5F5)
     } else {
@@ -460,26 +460,4 @@ private fun NodeIcon(node: FsNode) {
         }
     }
     Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp), tint = color)
-}
-
-/** 从路径推断语言（移植自 syntax_highlighter.dart 的 langFromPath）。 */
-fun langFromPath(path: String): String {
-    val base = path.substringAfterLast('/').lowercase()
-    val dot = base.lastIndexOf('.')
-    val ext = if (dot <= 0) "" else base.substring(dot + 1)
-    return when (ext) {
-        "dart" -> "dart"
-        "kt", "kts" -> "kotlin"
-        "java" -> "java"
-        "py" -> "python"
-        "js", "jsx", "ts", "tsx", "mjs", "cjs" -> "js"
-        "json", "jsonc" -> "json"
-        "sh", "bash", "zsh", "fish", "ksh" -> "shell"
-        "rs" -> "rust"
-        "c", "h", "cpp", "cc", "cxx", "hpp" -> "c"
-        "yaml", "yml" -> "yaml"
-        "md", "markdown" -> "markdown"
-        "xml", "html", "htm", "svg" -> "xml"
-        else -> "text"
-    }
 }

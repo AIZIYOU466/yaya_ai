@@ -72,6 +72,7 @@ fun App() {
         YayaiTheme {
             var tab by rememberSaveable { mutableStateOf(0) }
             var gitOpen by rememberSaveable { mutableStateOf(false) }
+            var editorPath by rememberSaveable { mutableStateOf<String?>(null) }
             Scaffold(
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 bottomBar = {
@@ -113,7 +114,7 @@ fun App() {
                     when (tab) {
                         0 -> PlaceholderScreen("聊天页（迁移中：P3 落地）")
                         1 -> TerminalScreen()
-                        2 -> FilesScreen(onOpenGit = { gitOpen = true })
+                        2 -> FilesScreen(onOpenFile = { editorPath = it }, onOpenGit = { gitOpen = true })
                         3 -> McpScreen()
                         else -> SettingsScreen()
                     }
@@ -128,6 +129,10 @@ fun App() {
                                 Icon(Icons.Filled.Close, contentDescription = "关闭 Git")
                             }
                         }
+                    }
+                    // 编辑器覆盖（由文件页点文件进入）
+                    editorPath?.let { path ->
+                        EditorScreen(path = path, onClose = { editorPath = null })
                     }
                 }
             }
