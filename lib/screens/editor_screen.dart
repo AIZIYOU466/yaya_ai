@@ -9,7 +9,7 @@ import '../widgets/syntax_highlighter.dart' as yh;
 /// 代码编辑器（ROADMAP 任务 22）。
 ///
 /// 双模式：编辑模式为等宽 [TextField]，预览模式按语言渲染
-/// （Markdown 用 [MarkdownWidget]，代码用语法高亮）。
+/// （Markdown 用 [Markdown]，代码用语法高亮）。
 class EditorScreen extends StatefulWidget {
   const EditorScreen({super.key, required this.path});
 
@@ -246,7 +246,7 @@ class _EditorScreenState extends State<EditorScreen> {
     if (_lang == yh.Lang.markdown) {
       return Padding(
         padding: const EdgeInsets.all(12),
-        child: MarkdownWidget(data: _ctrl.text, selectable: true),
+        child: Markdown(data: _ctrl.text, selectable: true, padding: EdgeInsets.zero),
       );
     }
     final span = yh.SyntaxHighlighter(_lang).render(_ctrl.text, base: base, dark: dark);
