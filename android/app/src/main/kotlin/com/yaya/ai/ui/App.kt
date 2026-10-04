@@ -5,8 +5,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Chat
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -64,7 +66,7 @@ fun App() {
         LocalSnackbar provides snackbarHostState,
     ) {
         YayaiTheme {
-            var tab by rememberSaveable { mutableStateOf(2) }
+            var tab by rememberSaveable { mutableStateOf(0) }
             Scaffold(
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 bottomBar = {
@@ -78,12 +80,24 @@ fun App() {
                         NavigationBarItem(
                             selected = tab == 1,
                             onClick = { tab = 1 },
-                            icon = { Icon(Icons.Filled.Folder, contentDescription = null) },
-                            label = { Text("文件") },
+                            icon = { Icon(Icons.Filled.Terminal, contentDescription = null) },
+                            label = { Text("终端") },
                         )
                         NavigationBarItem(
                             selected = tab == 2,
                             onClick = { tab = 2 },
+                            icon = { Icon(Icons.Filled.Folder, contentDescription = null) },
+                            label = { Text("文件") },
+                        )
+                        NavigationBarItem(
+                            selected = tab == 3,
+                            onClick = { tab = 3 },
+                            icon = { Icon(Icons.Filled.Extension, contentDescription = null) },
+                            label = { Text("MCP") },
+                        )
+                        NavigationBarItem(
+                            selected = tab == 4,
+                            onClick = { tab = 4 },
                             icon = { Icon(Icons.Filled.Settings, contentDescription = null) },
                             label = { Text("设置") },
                         )
@@ -93,7 +107,9 @@ fun App() {
                 Box(modifier = Modifier.fillMaxSize().padding(padding)) {
                     when (tab) {
                         0 -> PlaceholderScreen("聊天页（迁移中：P3 落地）")
-                        1 -> PlaceholderScreen("文件页（迁移中：P1 落地）")
+                        1 -> TerminalScreen()
+                        2 -> FilesScreen()
+                        3 -> McpScreen()
                         else -> SettingsScreen()
                     }
                 }
