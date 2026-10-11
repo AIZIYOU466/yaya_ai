@@ -227,8 +227,8 @@ class AgentHost(
                 "terminal" -> {
                     val command = action.optString("command", "")
                     val timeout = action.optLong("timeout_ms", 30000L)
-                    val out = ProotManager.runCommandBlocking(context, command, timeout)
-                    JSONObject().put("ok", true).put("message", out).toString()
+                    val (out, code) = ProotManager.runCommandBlockingWithCode(context, command, timeout)
+                    JSONObject().put("ok", true).put("message", out).put("exit_code", code).toString()
                 }
                 "clipboard_read" ->
                     JSONObject().put("ok", true).put("message", clipboardText()).toString()

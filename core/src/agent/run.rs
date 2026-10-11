@@ -406,8 +406,8 @@ pub fn run_loop(
                 reason,
             })?;
 
-            let (ok, content) = match v {
-                Verdict::Deny(r) => (false, format!("已拒绝：{r}")),
+            let (ok, content, _) = match v {
+                Verdict::Deny(r) => (false, format!("已拒绝：{r}"), None),
                 Verdict::Ask => {
                     let req = ApprovalRequest {
                         tool: call.function.name.clone(),
@@ -423,21 +423,10 @@ pub fn run_loop(
                     if allowed {
                         execute_call(&mut *core, call, cfg, on_event)
                     } else {
-                        (false, "已拒绝：用户未授权执行".to_string())
+                        (false, "已拒绝：用户未授权执行".to_string(), None)
                     }
                 }
                 Verdict::Allow => execute_call(&mut *core, call, cfg, on_event),
-            };
-            // 环境验证 oracle（R20）：不假设工具成功，可验证工具执行后自动验证，
-            // 验证失败会把原因回填给模型并标记为失败。
-            let (ok, content) = if ok {
-                let plan = crate::agent::verifier::plan_for(&call.function.name, &args);
-                match crate::agent::verifier::verify(&plan, &mut *core.executor) {
-                    Ok(()) => (ok, content),
-                    Err(reason) => (false, format!("{content}\n验证失败：{reason}")),
-                }
-            } else {
-                (ok, content)
             };
             on_event(Event::ToolResult {
                 name: call.function.name.clone(),
@@ -469,9 +458,10 @@ fn execute_call(
     call: &ToolCall,
     cfg: &RunConfig,
     on_event: &mut dyn FnMut(Event) -> Result<(), String>,
-) -> (bool, String) {
+) -> (bool, String, Option<i32>) {
     if call.function.name == subagent::TOOL_SUBAGENT {
-        return subagent::run_subagent(core, call, cfg, on_event);
+        let (ok, txt) = subagent::run_subagent(core, call, cfg, on_event);
+        return (ok, txt, None);
     }
     // MCP 白名单校验（R16）：配置后未知工具默认拒绝。
     if let Some(allow) = &cfg.mcp_tool_allowlist {
@@ -481,18 +471,35 @@ fn execute_call(
             return (
                 false,
                 format!("MCP 工具 {} 不在启用白名单，已拒绝", call.function.name),
+                None,
             );
         }
     }
-    tools::dispatch(
+    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+    let (ok, content, exit_code) = tools::dispatch(
         call,
         &mut *core.executor,
         core.mcp.as_deref_mut(),
         core.memory_store.as_mut(),
         core.file_access.as_mut(),
-    )
+    );
+    if !ok {
+        return (ok, content, exit_code);
+    }
+    // 环境验证 oracle（R20/40）：不假设工具成功，可验证工具执行后自动验证，
+    // 验证失败会把原因回填给模型并标记为失败（此处在 execute_call 内独占 core，
+    // 字段借用无并发）。
+    let plan = crate::agent::verifier::plan_for(&call.function.name, &args);
+    match crate::agent::verifier::verify(
+        &plan,
+        exit_code,
+        core.executor.as_mut(),
+        &mut core.file_access,
+    ) {
+        Ok(()) => (ok, content, exit_code),
+        Err(reason) => (false, format!("{content}\n验证失败：{reason}"), exit_code),
+    }
 }
-
 fn emit_state(
     on_event: &mut dyn FnMut(Event) -> Result<(), String>,
     machine: &TaskMachine,
@@ -515,7 +522,7 @@ fn fail(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::executor::{Action, ActionExecutor};
+    use crate::agent::executor::{Action, ActionExecutor, ExecResult};
     use crate::agent::mcp::{McpClient, McpTool};
     use crate::agent::model::{FunctionCall, ModelBackend, ModelOutput, ToolCall};
     use crate::agent::router::{Backend, RouteHints};
@@ -545,8 +552,12 @@ mod tests {
 
     struct NoopExecutor;
     impl ActionExecutor for NoopExecutor {
-        fn execute(&mut self, _a: &Action) -> Result<String, String> {
-            Ok("done".into())
+        fn execute(&mut self, _a: &Action) -> Result<ExecResult, String> {
+            // 模拟终端命令成功退出 0（terminal_exec 验证断言 Some(0)）。
+            Ok(ExecResult {
+                text: "done".into(),
+                exit_code: Some(0),
+            })
         }
     }
 

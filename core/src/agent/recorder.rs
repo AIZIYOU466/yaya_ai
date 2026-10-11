@@ -247,7 +247,7 @@ impl ModelBackend for ReplayBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::executor::{Action, ActionExecutor};
+    use crate::agent::executor::{Action, ActionExecutor, ExecResult};
     use crate::agent::model::{GenerateRequest, ModelBackend};
     use crate::agent::router::RouteHints;
     use crate::agent::{run_loop, AgentCore, Event, RunConfig};
@@ -285,8 +285,11 @@ mod tests {
 
     struct NoopExecutor;
     impl ActionExecutor for NoopExecutor {
-        fn execute(&mut self, _action: &Action) -> Result<String, String> {
-            Ok("ok".into())
+        fn execute(&mut self, _action: &Action) -> Result<ExecResult, String> {
+            Ok(ExecResult {
+                text: "ok".into(),
+                exit_code: Some(0),
+            })
         }
     }
 

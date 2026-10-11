@@ -141,6 +141,45 @@ object ProotManager {
         return output.toString().trimEnd()
     }
 
+    /**
+     * 同步执行命令并返回输出 + 退出码，供 Agent 的 terminal_exec 工具验证退出码使用。
+     * 与 [runCommandBlocking] 同逻辑，但 payload 额外输出 `$?` 以捕获进程退出码。
+     */
+    @Synchronized
+    fun runCommandBlockingWithCode(context: Context, command: String, timeoutMs: Long): Pair<String, Int> {
+        if (!process.isRunning()) {
+            if (!start(context)) {
+                throw IllegalStateException(lastError ?: "终端容器启动失败")
+            }
+        }
+        val p = process ?: throw IllegalStateException("终端容器未启动")
+
+        val marker = "$EXIT_MARKER${System.nanoTime()}>"
+        val output = StringBuilder()
+        var code = -1
+        val done = CountDownLatch(1)
+        val previous = lineListener
+        lineListener = { line ->
+            if (line.startsWith(marker)) {
+                code = line.removePrefix(marker).trim().toIntOrNull() ?: -1
+                done.countDown()
+            } else {
+                output.append(line).append('\n')
+            }
+        }
+
+        val payload = "$command; printf '\\n%s%d\\n' \"$marker\" \"\$?\"\n"
+        p.outputStream.write(payload.toByteArray())
+        p.outputStream.flush()
+
+        val finished = done.await(timeoutMs, TimeUnit.MILLISECONDS)
+        lineListener = previous
+        if (!finished) {
+            throw IllegalStateException("命令超时（${timeoutMs}ms）")
+        }
+        return output.toString().trimEnd() to code
+    }
+
     fun stopCommand() {
         val p = process ?: return
         try {

@@ -10,7 +10,7 @@
 //! 契约总则（AGENTS.md R15「不静默」）：失败必须返回 `Err`/`false`，不得 panic、不得假装成功。
 
 use serde_json::{json, Value};
-use yaya_core::agent::executor::{Action, ActionExecutor};
+use yaya_core::agent::executor::{Action, ActionExecutor, ExecResult};
 use yaya_core::agent::mcp::{McpClient, McpTool};
 use yaya_core::agent::memory::{MemoryMeta, MemoryStore};
 use yaya_core::agent::model::{
@@ -29,9 +29,9 @@ struct MemExecutor {
 }
 
 impl ActionExecutor for MemExecutor {
-    fn execute(&mut self, action: &Action) -> Result<String, String> {
+    fn execute(&mut self, action: &Action) -> Result<ExecResult, String> {
         self.seen.push(action.clone());
-        Ok(format!("executed:{}", self.seen.len()))
+        Ok(ExecResult::text(format!("executed:{}", self.seen.len())))
     }
 }
 

@@ -60,7 +60,7 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::executor::{Action, ActionExecutor};
+    use crate::agent::executor::{Action, ActionExecutor, ExecResult};
     use crate::agent::model::{BackendError, GenerateRequest, ModelBackend, ModelOutput};
     use crate::agent::router::Backend;
     use crate::agent::RouteHints;
@@ -88,8 +88,11 @@ mod tests {
 
     struct NoopExecutor;
     impl ActionExecutor for NoopExecutor {
-        fn execute(&mut self, _a: &Action) -> Result<String, String> {
-            Ok("done".into())
+        fn execute(&mut self, _a: &Action) -> Result<ExecResult, String> {
+            Ok(ExecResult {
+                text: "done".into(),
+                exit_code: Some(0),
+            })
         }
     }
 

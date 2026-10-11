@@ -26,7 +26,25 @@ pub enum Action {
     },
 }
 
+/// 动作执行结果：面向模型的结果文本 + 可选退出码（终端类动作）。
+/// 退出码放结果而非请求（它是执行产物，不是参数），terminal_exec 验证据此断言。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExecResult {
+    pub text: String,
+    /// 进程退出码（`Action::Terminal`）；其余动作 None。
+    pub exit_code: Option<i32>,
+}
+
+impl ExecResult {
+    pub fn text(text: impl Into<String>) -> Self {
+        ExecResult {
+            text: text.into(),
+            exit_code: None,
+        }
+    }
+}
+
 pub trait ActionExecutor: Send {
-    /// 执行动作，返回面向模型的结果文本（成功或失败说明）。
-    fn execute(&mut self, action: &Action) -> Result<String, String>;
+    /// 执行动作，返回面向模型的结果文本 + 可选退出码（成功或失败说明）。
+    fn execute(&mut self, action: &Action) -> Result<ExecResult, String>;
 }

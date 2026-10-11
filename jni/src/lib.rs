@@ -18,7 +18,7 @@ use jni::sys::jstring;
 use jni::{JNIEnv, JavaVM};
 use serde_json::Value;
 
-use yaya_core::agent::executor::{Action, ActionExecutor};
+use yaya_core::agent::executor::{Action, ActionExecutor, ExecResult};
 use yaya_core::agent::local_parse;
 use yaya_core::agent::mcp::{McpClient, McpTool};
 use yaya_core::agent::memory::{MemoryMeta, MemoryStore};
@@ -147,11 +147,11 @@ impl JniHost {
 }
 
 impl ActionExecutor for JniHost {
-    fn execute(&mut self, action: &Action) -> Result<String, String> {
+    fn execute(&mut self, action: &Action) -> Result<ExecResult, String> {
         let json = serde_json::to_string(action).map_err(|e| format!("动作序列化失败: {e}"))?;
         let out = self.call_str("executeAction", &json)?;
         if out.trim().is_empty() {
-            return Ok("执行成功".to_string());
+            return Ok(ExecResult::text("执行成功"));
         }
         let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
         let ok = v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false);
@@ -160,11 +160,19 @@ impl ActionExecutor for JniHost {
             .and_then(|m| m.as_str())
             .unwrap_or("")
             .to_string();
+        // 可选退出码（Kotlin terminal 返回）；其余动作缺省 None。
+        let exit_code = v
+            .get("exit_code")
+            .and_then(|c| c.as_i64())
+            .and_then(|c| i32::try_from(c).ok());
         if ok {
-            Ok(if msg.is_empty() {
-                "执行成功".to_string()
-            } else {
-                msg
+            Ok(ExecResult {
+                text: if msg.is_empty() {
+                    "执行成功".to_string()
+                } else {
+                    msg
+                },
+                exit_code,
             })
         } else {
             Err(if msg.is_empty() {
