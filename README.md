@@ -18,7 +18,8 @@ Kotlin 执行层
   ├─ 剪贴板 / 本地通知（不依赖无障碍服务）
   ├─ proot Linux 容器（RootfsInstaller 镜像目录 + ProotManager，工作区 bind 到 /workspace）
   ├─ McpProcessManager（stdio JSON-RPC 子进程 + initialize 握手 + 按 id 匹配 + 超时）
-  ├─ AgentDatabase（SQLite：sessions / messages / checkpoints / memories）
+  ├─ AgentDatabase（SQLite：sessions / messages / checkpoints / memories；消息含图片附件路径）
+  ├─ ChatImages（聊天图片：相册选图 → JPEG 压缩 → 受管文件，随消息持久化）
   ├─ WorkspaceFileAccess（FileAccess trait + 路径归一化与越界校验）
   └─ llama.cpp（ModelBridge，默认 STUB）
   │  JNI
@@ -35,13 +36,17 @@ Rust Agent Core（crate `yaya-core`，唯一规范源）
   ├─ skill.rs      技能（SKILL.md 扫描与系统提示词注入）
   ├─ openai.rs     OpenAI 兼容协议（含流式 tool_calls 解析）
   ├─ cloud.rs      云端后端（reqwest + rustls，feature `cloud-http`）
+  ├─ provider.rs   多模型提供商协议适配（OpenAI / Anthropic / Gemini，请求构造 + SSE 解析统一接口）
   ├─ mcp.rs        MCP 工具接入（命名空间 + McpClient trait）
   ├─ capability.rs 能力模型解析与应用（上下文窗口钳制 token 预算）
   ├─ degrade.rs    降级状态机（Full / NoTools / BareText，五类失败信号 + 指数退避重探）
+  ├─ pool.rs       端点池与质量感知路由（EndpointProfile / EndpointPool，按健康与复杂度打分 + 故障切换）
   ├─ canary.rs     金丝雀探测（已知答案题监控输出质量漂移）
   ├─ verifier.rs   环境验证 oracle（工具执行后读回比较，不假设成功）
   ├─ signals.rs    平台环境信号槽（网络丢失 / 切后台 / 省电，只传信号不传决策）
   ├─ local_parse.rs 端侧小模型 function-calling（ChatML/Hermes 渲染 + 文本解析）
+  ├─ recorder.rs   事件录制与回放（RecordingBackend / ReplayBackend，ROADMAP 任务 38）
+  ├─ eval.rs       Agent 能力评测基准（工具调用准确率 / 多步完成率 / 上下文保持 / 失败恢复率）
   ├─ events.rs     跨端事件协议（含 ToolPolicy 决策原因码）
   └─ executor.rs / model.rs   平台 trait（ActionExecutor / ModelBackend / McpClient）
 ```
@@ -100,6 +105,11 @@ Kotlin/Compose 侧**不得**重复实现循环、路由、工具层或协议解�
 - **Git 版本管理**：状态/分支/提交三标签页，经 proot 容器执行 git（需容器安装 git，
   如 Alpine `apk add git`；工作区已挂载进容器 `/workspace`）。
 - **多会话管理**：新建、切换、重命名、删除；进程重启后恢复最近会话。
+- **多模型提供商**：OpenAI / Anthropic / Gemini 三种协议；支持拉取模型列表与手动添加、
+  能力标签（tools / image / 上下文窗口）、对话页一键切换模型；端点池按健康度选路并故障切换。
+- **多模态图片**：聊天可附最多 4 张相册图片（最长边压缩到 1280 的 JPEG），随首条 user 消息
+  按协议下发；助手回复中的 Markdown 图片内联展示，点开全屏双指缩放。图片按消息落盘，
+  会话恢复后仍可查看；当前模型未标注 `image` 能力时平台侧拦截并提示。
 - **技能**：`filesDir/skills/<name>/SKILL.md`（frontmatter + 正文）自动扫描注入系统提示词。
 - **Linux 容器**：镜像目录（内置 Alpine minirootfs 约 4MB + 用户自定义 URL/SHA256），
   支持安装/切换/重置。
@@ -113,7 +123,7 @@ llama.cpp JNI，**默认 STUB**（运行时显式输出桩提示，禁止伪装�
 ## 构建与验证
 
 ```bash
-# 1. Rust Core（本地可完整验证，125 项测试）
+# 1. Rust Core（本地可完整验证，199 项测试）
 cargo test -p yaya-core
 cargo check -p yaya-core --features cloud-http
 

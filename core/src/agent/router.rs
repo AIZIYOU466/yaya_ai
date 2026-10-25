@@ -2,7 +2,7 @@
 //!
 //! 唯一实现：Android 经 JNI、桌面同进程，均调用本模块（AGENTS.md R6）。
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Backend {
     Jni,
     Desktop,

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// 模型/端点能力集（config 声明，可被探测结果覆盖）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Capabilities {
     /// 支持流式 tool_calls 分片（SSE）。
     pub streaming_tool_calls: bool,

@@ -38,3 +38,6 @@ android/app/src/main/cpp/llama_cpp/
 
 # OS
 Thumbs.db
+
+# Compose 桌面预览工具（ui-preview）的本地 Gradle 缓存
+ui-preview/.gradle/

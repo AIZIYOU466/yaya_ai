@@ -58,14 +58,16 @@
   - 内置工具：`terminal_exec` / `clipboard_read` / `clipboard_write` / `notify`（`tools.rs`）；设备操控类工具已移除
   - `core/src/agent/tools.rs` / `openai.rs` / `events.rs` / `cloud.rs` / `mcp.rs`
   - `core/src/agent/capability.rs` / `canary.rs` / `verifier.rs` —— 能力探测 / 金丝雀 / 环境验证
-  - `core/src/agent/workspace.rs` —— 工作区文件系统（`FileAccess` trait + 5 个文件工具）
+  - `core/src/agent/degrade.rs` / `signals.rs` —— 降级状态机（健康环）/ 环境信号槽
+  - `core/src/agent/recorder.rs` —— 事件录制与回放（`RecordingBackend` / `ReplayBackend`，ROADMAP 任务 38）
+  - `core/src/agent/workspace.rs` —— 工作区文件系统（`FileAccess` trait + 6 个文件工具：list / read / patch / write / edit / delete）
 - **Android 经 JNI 共享 core**：`jni/` crate 编译为 `libyaya_core_jni.so`；平台差异经 `ActionExecutor` / `ModelBackend` / `McpClient` 三个 trait 由 Kotlin 实现注入。
 - **禁止**在 Kotlin/Compose 侧重复实现循环、路由、工具层或 OpenAI 解析（防逻辑漂移）。
 
 ## R8 CI 默认 STUB
 
 - Rust job（`.github/workflows/rust-core.yml`）：`cargo test -p yaya-core` 与 `cargo check --workspace`，默认**不**启用 `cloud-http`。
-- Android job（`.github/workflows/flutter-android.yml`）：先用 NDK + rust android targets + `scripts/build-android.sh` 交叉编译 `libyaya_core_jni.so`，再 `flutter build apk`；默认 **STUB 推理**（不启用 `-PenableLlamaCpp`）。
+- Android job（`.github/workflows/android-release.yml`）：先用 NDK + rust android targets + `scripts/build-android.sh` 交叉编译 `libyaya_core_jni.so`，再 `./gradlew assembleRelease`；默认 **STUB 推理**（不启用 `-PenableLlamaCpp`）。
 - 完整 llama.cpp 构建**仅在本地进行**（`-PenableLlamaCpp=true` 且源码就位），CI 中跳过。
 
 ## R10 MCP 工具接入
@@ -87,10 +89,11 @@
 
 ## R13 本地持久化（Android 侧 SQLite，零依赖）
 
-- 会话 / 消息 / 检查点由 `android/.../AgentDatabase.kt`（SQLiteOpenHelper）持久化；Rust Core 不持久化（无状态循环机）。
-- `AgentHost.onEvent` 同步写库（tool 消息、流式 token 累积后的 assistant 文本、system 提示）；`run()` 开始写入 user 消息并 upsert 会话。
-- 每次工具调用执行前自动保存一次检查点（消息快照），UI 可回滚到任意检查点并继续。
-- 进程被杀后重启，UI 经 `AgentApi.loadRecentSession` 恢复最近会话展示。
+- 会话 / 消息 / 检查点由 `android/.../AgentDatabase.kt`（SQLiteOpenHelper）持久化；Rust Core 不直接落盘，但暴露可序列化状态交平台保存（任务 43）。
+- **循环光标（任务 43，2026-10-18 R13 更新，已获用户授权）**：core 暴露可序列化 `LoopState`（`stage` + `step` + `messages` + 待执行 tool_calls 游标 `pending_calls`/`pending_cursor` + degrade 快照），经 `Event::LoopState` 交平台落盘（`AgentHost` 存 `agent_state/loop_state`），恢复经 `RunConfig.loop_state` 注入续跑；检查点从「消息快照」升级为「循环光标」。存档时机：工具调用执行后（每个 tool 完成发一档）、后台中断前（stage=generate）。恢复语义：stage=tools 时从 `pending_cursor` 续跑未执行部分（已完成工具不重复执行），stage=generate 时重跑本步生成；任务 `done` 时平台清除断点，降级快照保留。序列化边界含 4C-2/4C-3 最终形态（`BehaviorHistory`：`forced_failure_count` / `canary_cooling` / `last_tool_call` 等）。
+- `AgentHost.onEvent` 同步写库（tool 消息、流式 token 累积后的 assistant 文本、system 提示）；`run()` 开始写入 user 消息并 upsert 会话，并注入 `degradeState` / `loopState`。
+- 每次工具调用执行前自动保存一次检查点（消息快照），UI 可回滚到任意检查点并继续（保留；循环光标是续跑机制，检查点仍是回滚 UI）。
+- 进程被杀后重启：UI 经 `AgentApi.loadRecentSession` 恢复最近会话展示；任务续跑由 `loop_state` 断点恢复。
 - 表结构：`sessions` / `messages` / `checkpoints` / `memories`；版本管理用 `DB_VERSION` + `onUpgrade` 逐级迁移（见 `AgentDatabase`）。
 
 ## R14 技能 / 记忆 / 子代理
@@ -121,7 +124,7 @@
 
 ## R17 发版流程
 
-版本由 Git Tag 驱动（`vX.Y.Z`），CI（`.github/workflows/flutter-android.yml`）捕获 Tag 构建签名 APK：
+版本由 Git Tag 驱动（`vX.Y.Z`），CI（`.github/workflows/android-release.yml`）捕获 Tag 构建签名 APK：
 
 1. `main` 上所有待发布改动已合入且 `cargo test` / JNI check 通过。
 2. 打 `vX.Y.Z` Tag 并推送 → CI 构建 Release APK。
@@ -139,7 +142,7 @@
 
 - 工作区根：`filesDir/workspace/`（Kotlin `WorkspaceFileAccess`），工具只接受**相对路径**；所有路径先 `normalize` 再校验必须落在工作区内（防目录穿越），绝对路径与越界路径一律拒绝。
 - **容器一致性**：工作区同时由 `ProotManager` bind 进 proot 容器固定路径 `/workspace`，使 `git`/`terminal` 工具与 `file_*` 工具看到同一目录（ROADMAP 任务 23）。
-- 工具：`file_list` / `file_read` / `file_write` / `file_edit` / `file_delete`（唯一实现在 `core/src/agent/workspace.rs`）；读取有 2000 行 / 200KB 窗口，超限截断并用 `start_line` 分段续读。
+- 工具：`file_list` / `file_read` / `file_patch` / `file_write` / `file_edit` / `file_delete`（唯一实现在 `core/src/agent/workspace.rs`）；读取有 2000 行 / 200KB 窗口，超限截断并用 `start_line` 分段续读。
 - 权限：读/列只读放行（PLAN 可用）；写/编辑/删除不可逆（BUILD 需确认，见 R12）。
 - **禁止**在 Kotlin/Compose 侧重复实现工具语义与参数校验（只做平台文件操作与路径安全）。
 
@@ -148,7 +151,7 @@
 - Core：`cargo test -p yaya-core`；云端后端：`cargo check -p yaya-core --features cloud-http`。
 - Android target 编译检查（无需 NDK，check 不链接）：`cargo check -p yaya-core-jni --target aarch64-linux-android --no-default-features`。
 - Android JNI 交叉编译：`ANDROID_NDK_HOME=<ndk> bash scripts/build-android.sh`（直接用 NDK clang → `android/app/src/main/jniLibs/`，不依赖 cargo-ndk）。
-- Android App：`flutter build apk --release`。CI：`.github/workflows/flutter-android.yml`
+- Android App：`./gradlew assembleRelease`。CI：`.github/workflows/android-release.yml`
   （JDK 17 / Gradle 8.7 wrapper 已入库，AGP 8.3.2 / Kotlin 1.9.24 / Compose BOM 2024.05）。
 - 本地工具链不全时，以 CI 结果为准；标记 UNVERIFIED 的路径不得宣称已验证。
   - **已知（已突破 2026-10）**：本容器为 aarch64，NDK 仅提供 linux-x86_64 预编译工具链、二进制无法直接运行；但 NDK sysroot 是跨架构数据，配合系统 clang（apt install clang lld）即可本地交叉链接：

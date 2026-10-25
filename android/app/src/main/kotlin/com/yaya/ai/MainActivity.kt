@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -34,6 +35,19 @@ interface AgentApi {
 
     /** 启动一次 Agent 任务（后台线程运行，事件经 [events] 回推）。 */
     fun startAgent(taskId: String, prompt: String, configJson: String): Boolean
+
+    /** 挂起当前任务（保存检查点，不丢弃）；配合 [resumeAgent] 续跑（任务 27）。 */
+    fun suspendAgent()
+
+    /** 从检查点继续挂起的任务；无断点返回 false。 */
+    fun resumeAgent(taskId: String, configJson: String): Boolean
+
+    /** 是否存在可恢复的任务断点（冷启动恢复暂停状态）。 */
+    fun hasPendingTask(): Boolean
+
+    /** 丢弃挂起任务的断点（用户明确放弃）。 */
+    fun clearPendingTask()
+
     fun stopAgent()
 
     /** 回传用户对一次授权请求的选择（见事件 `approval_request`）。 */
@@ -51,8 +65,11 @@ interface AgentApi {
     fun renameSession(sessionId: String, title: String)
     fun deleteSession(sessionId: String)
 
-    /** 会话检查点列表 `[{messages:[...]}]`，新 → 旧。 */
+    /** 会话检查点列表 `[{id,createdAt,messages:[...]}]`，新 → 旧。 */
     fun checkpoints(sessionId: String): String
+
+    /** 回滚到指定检查点（快照覆盖会话消息）；成功返回回滚后消息 JSON `[{role,text,ok}]`。 */
+    fun restoreCheckpoint(sessionId: String, checkpointId: Long): String?
 
     /** 全局统计 `{sessions,messages,toolCalls,errors,totalTokens,checkpoints}`。 */
     fun getStats(): String
@@ -91,6 +108,14 @@ interface AgentApi {
     // ── 前台服务 ──
     fun startAgentService()
     fun stopAgentService()
+
+    // ── 云端模型 ──
+    /**
+     * 按协议拉取模型列表（阻塞，调用方在 IO 线程执行）。
+     * `type`: openai / anthropic / gemini。返回 `{"ok":true,"models":["..."]}` 或
+     * `{"ok":false,"message":"..."}`——失败必须显式回传（R15 不静默）。
+     */
+    fun listModels(baseUrl: String, apiKey: String, type: String): String
 }
 
 class MainActivity : ComponentActivity(), AgentApi {
@@ -129,6 +154,24 @@ class MainActivity : ComponentActivity(), AgentApi {
     // Android 13+ notify 工具需运行时权限：首次启动请求一次，用户拒绝则工具显式报错。
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // edge-to-edge：内容延伸到手势栏下 + 系统栏透明无 scrim + 浅色主题深色图标。
+        // enableEdgeToEdge 处理各 Android 版本/ROM 的 edge case，比手动 setDecorFits 可靠
+        // （手动版在部分设备上顶部生效但底部手势栏区域仍露系统白色）。
+        enableEdgeToEdge(
+            statusBarStyle = androidx.activity.SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
+            ),
+            navigationBarStyle = androidx.activity.SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
+            ),
+        )
+        // 刘海/挖孔屏也伸进去：不设置时该区域停在窗口边缘，顶部露出一条窗口底色带
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            val attrs = window.attributes
+            attrs.layoutInDisplayCutoutMode =
+                android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            window.attributes = attrs
+        }
         if (Build.VERSION.SDK_INT >= 33 &&
             checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -156,8 +199,33 @@ class MainActivity : ComponentActivity(), AgentApi {
 
     override fun startAgent(taskId: String, prompt: String, configJson: String): Boolean {
         if (agentTaskThread?.isAlive == true) return false // 已有任务在运行
+        startAgentThread { agentHost.run(taskId, prompt, configJson) }
+        return true
+    }
+
+    override fun suspendAgent() {
+        agentHost.suspend()
+    }
+
+    override fun resumeAgent(taskId: String, configJson: String): Boolean {
+        if (agentTaskThread?.isAlive == true) return false
+        startAgentThread { agentHost.resume(taskId, configJson) }
+        return true
+    }
+
+    override fun hasPendingTask(): Boolean = agentHost.hasPendingTask()
+
+    override fun clearPendingTask() {
+        agentHost.clearPendingTask()
+    }
+
+    /** 后台执行一次 native 循环；前台服务只是活跃窗口加速器（任务 44）。 */
+    private fun startAgentThread(block: () -> String) {
+        // 前台服务 = 当前活跃窗口的加速器（任务 44：执行与保活解耦，
+        // 任务状态在 loop_state 检查点；服务超时/被杀后经检查点续跑）。
+        AgentForegroundService.start(this)
         agentTaskThread = Thread {
-            val resultText = agentHost.run(taskId, prompt, configJson)
+            val resultText = block()
             // libLoaded=false 等非事件化失败路径：经事件通道送回错误。
             if (resultText.startsWith("ERROR:")) {
                 eventsFlow.tryEmit(
@@ -167,11 +235,12 @@ class MainActivity : ComponentActivity(), AgentApi {
                     }.toString()
                 )
             }
+            // 任务线程结束：释放前台服务（下次任务再启动；onTimeout 耗尽路径由系统负责重启）。
+            AgentForegroundService.stop(this)
         }.apply {
             name = "yaya-agent"
             start()
         }
-        return true
     }
 
     override fun stopAgent() {
@@ -194,6 +263,8 @@ class MainActivity : ComponentActivity(), AgentApi {
         agentHost.deleteSession(sessionId)
     }
     override fun checkpoints(sessionId: String): String = agentHost.checkpointsJson(sessionId)
+    override fun restoreCheckpoint(sessionId: String, checkpointId: Long): String? =
+        agentHost.restoreCheckpoint(sessionId, checkpointId)
     override fun getStats(): String = agentHost.stats()
 
     // ── 工作区文件 ——
@@ -286,6 +357,79 @@ class MainActivity : ComponentActivity(), AgentApi {
     }
 
     // ── 前台服务 ──
+
+    override fun listModels(baseUrl: String, apiKey: String, type: String): String {
+        val base = baseUrl.trim().trimEnd('/')
+        if (base.isEmpty()) return """{"ok":false,"message":"Base URL 为空"}"""
+        if (apiKey.isBlank()) return """{"ok":false,"message":"API Key 为空"}"""
+        // 协议差异（任务 25）：路径 / 认证头 / 响应字段。
+        val url: String
+        val headers = mutableListOf<Pair<String, String>>()
+        val gemini = type == "gemini"
+        when (type) {
+            "anthropic" -> {
+                url = if (base.endsWith("/v1")) "$base/models" else "$base/v1/models"
+                headers += "x-api-key" to apiKey
+                headers += "anthropic-version" to "2023-06-01"
+            }
+            "gemini" -> {
+                url = if (base.endsWith("/v1beta")) "$base/models" else "$base/v1beta/models"
+                headers += "x-goog-api-key" to apiKey
+            }
+            else -> {
+                url = "$base/models"
+                headers += "Authorization" to "Bearer $apiKey"
+            }
+        }
+        return try {
+            val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+            headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 15_000
+            try {
+                val code = conn.responseCode
+                if (code != 200) {
+                    val detail = runCatching {
+                        (conn.errorStream ?: conn.inputStream).bufferedReader().readText().take(160)
+                    }.getOrDefault("")
+                    return JSONObject().apply {
+                        put("ok", false)
+                        put("message", "HTTP $code${if (detail.isBlank()) "" else "：$detail"}")
+                    }.toString()
+                }
+                val body = conn.inputStream.bufferedReader().readText()
+                val root = JSONObject(body)
+                val ids = mutableListOf<String>()
+                if (gemini) {
+                    val arr = root.optJSONArray("models") ?: JSONArray()
+                    for (i in 0 until arr.length()) {
+                        val m = arr.optJSONObject(i) ?: continue
+                        val methods = m.optJSONArray("supportedGenerationMethods")
+                        val supportsChat = methods == null ||
+                            (0 until methods.length()).any { methods.optString(it) == "generateContent" }
+                        if (!supportsChat) continue
+                        m.optString("name").removePrefix("models/").takeIf { it.isNotBlank() }?.let { ids += it }
+                    }
+                } else {
+                    val arr = root.optJSONArray("data") ?: JSONArray()
+                    for (i in 0 until arr.length()) {
+                        arr.optJSONObject(i)?.optString("id")?.takeIf { it.isNotBlank() }?.let { ids += it }
+                    }
+                }
+                JSONObject().apply {
+                    put("ok", true)
+                    put("models", JSONArray(ids.distinct().sorted()))
+                }.toString()
+            } finally {
+                conn.disconnect()
+            }
+        } catch (e: Exception) {
+            JSONObject().apply {
+                put("ok", false)
+                put("message", "请求失败：${e.message ?: e.javaClass.simpleName}")
+            }.toString()
+        }
+    }
 
     override fun startAgentService() {
         AgentForegroundService.start(this)

@@ -29,9 +29,20 @@ object ProotManager {
     private var readerThread: Thread? = null
     @Volatile
     private var lineListener: ((String) -> Unit)? = null
+    /// 全局输出观察者（任务 33）：`(source, line)`，source ∈ ui / agent。
+    /// 终端页据此把 AI 经 terminal_exec 执行的命令输出收进「AI」标签。
+    @Volatile
+    private var outputObserver: ((String, String) -> Unit)? = null
+    /** 当前输出归属：UI 命令 / Agent 命令（同一时刻只有一个写入者）。 */
+    @Volatile
+    private var lineSource: String = "ui"
     /// 最近一次启动失败的详细原因（供 UI 显示）。
     @Volatile
     var lastError: String? = null
+
+    fun setOutputObserver(listener: ((String, String) -> Unit)?) {
+        outputObserver = listener
+    }
 
     fun start(context: Context): Boolean {
         if (process.isRunning()) return true
@@ -82,6 +93,11 @@ object ProotManager {
             try {
                 while (!Thread.currentThread().isInterrupted) {
                     val line = reader.readLine() ?: break
+                    outputObserver?.invoke(lineSource, line)
+                    // 任务 33：agent 命令输出进「AI」标签日志（哨兵行不入日志）。
+                    if (lineSource == "agent" && !line.contains(EXIT_MARKER)) {
+                        TerminalLog.append(line)
+                    }
                     lineListener?.invoke(line)
                 }
             } catch (_: Exception) {
@@ -102,6 +118,7 @@ object ProotManager {
     @Synchronized
     fun executeCommand(command: String) {
         val p = process ?: return
+        lineSource = "ui"
         // 哨兵行通知 ModelStreamHandler 结束本次输出流（不销毁容器进程）
         val payload = "$command; printf '\\n$EXIT_MARKER%s>\\n' \"\$?\"\n"
         p.outputStream.write(payload.toByteArray())
@@ -120,6 +137,8 @@ object ProotManager {
             }
         }
         val p = process ?: throw IllegalStateException("终端容器未启动")
+        // 同步命令（Git 等）不算 agent 命令，不写「AI」标签日志。
+        lineSource = "ui"
 
         val marker = "$EXIT_MARKER${System.nanoTime()}>"
         val output = StringBuilder()
@@ -168,16 +187,26 @@ object ProotManager {
             }
         }
 
-        val payload = "$command; printf '\\n%s%d\\n' \"$marker\" \"\$?\"\n"
-        p.outputStream.write(payload.toByteArray())
-        p.outputStream.flush()
+        // 任务 33：agent 命令（terminal_exec）单独计入「AI」标签日志。
+        lineSource = "agent"
+        TerminalLog.begin(command)
+        try {
+            val payload = "$command; printf '\\n%s%d\\n' \"$marker\" \"\$?\"\n"
+            p.outputStream.write(payload.toByteArray())
+            p.outputStream.flush()
 
-        val finished = done.await(timeoutMs, TimeUnit.MILLISECONDS)
-        lineListener = previous
-        if (!finished) {
-            throw IllegalStateException("命令超时（${timeoutMs}ms）")
+            val finished = done.await(timeoutMs, TimeUnit.MILLISECONDS)
+            if (!finished) {
+                throw IllegalStateException("命令超时（${timeoutMs}ms）")
+            }
+            TerminalLog.end(code)
+            return output.toString().trimEnd() to code
+        } finally {
+            lineListener = previous
+            lineSource = "ui"
+            // 超时/异常路径也要收尾（end 幂等，已结束不会重复改）。
+            TerminalLog.end(null)
         }
-        return output.toString().trimEnd() to code
     }
 
     fun stopCommand() {

@@ -174,6 +174,9 @@ pub struct GenerateRequest {
     pub max_tokens: Option<u32>,
     /// 是否流式（BareText 降级档关流式，走整包请求）。
     pub stream: bool,
+    /// tool_choice 覆盖（4C-3 行为补偿）：`None` = 默认 auto；`Some("required")` 强制一轮。
+    /// 仅在 tools 非空时生效（请求构造只在有 tools 时下发 tool_choice）。
+    pub tool_choice: Option<String>,
 }
 
 /// 后端失败类别（commit 1 起由 `openai::classify_status` 等判定）。
@@ -261,6 +264,10 @@ pub struct Usage {
     pub completion_tokens: u32,
     #[serde(default)]
     pub total_tokens: u32,
+    /// 命中提示词缓存的 token 数（任务 30）：OpenAI `prompt_tokens_details.cached_tokens`、
+    /// Anthropic `cache_read_input_tokens`、Gemini `cachedContentTokenCount`；未知为 0。
+    #[serde(default)]
+    pub cached_tokens: u32,
 }
 
 pub trait ModelBackend: Send {

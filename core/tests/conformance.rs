@@ -210,6 +210,7 @@ fn sample_request() -> GenerateRequest {
         model: None,
         max_tokens: Some(64),
         stream: true,
+        tool_choice: None,
     }
 }
 

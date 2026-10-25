@@ -59,6 +59,10 @@ class AgentHost(
     // 持久化状态：当前会话与流式 assistant 文本累积。
     private var currentSessionId: String? = null
     private val assistantBuffer = StringBuilder()
+    // 任务 30：usage 事件先缓冲，done/error 时在 assistant 之后落库（恢复时按顺序配对）。
+    private val usageBuffer = mutableListOf<JSONObject>()
+    private var priceInputPerM = 0.0
+    private var priceOutputPerM = 0.0
 
     private external fun nativeRunLoop(
         taskId: String,
@@ -68,6 +72,10 @@ class AgentHost(
     ): String
 
     private external fun nativeCancel()
+
+    private external fun nativeSuspend()
+
+    private external fun nativeClearSuspend()
 
     /** 网络连接丢失（`NetworkCallback.onLost`）/恢复（`onAvailable`）。 */
     private external fun nativeSetNetworkLost(lost: Boolean)
@@ -99,31 +107,104 @@ class AgentHost(
             return "ERROR: Rust Core 库 libyaya_core_jni.so 未加载（需 scripts/build-android.sh 交叉编译）"
         }
         currentSessionId = taskId
+        assistantBuffer.setLength(0)
+        usageBuffer.clear()
+        priceInputPerM = try { JSONObject(configJson).optDouble("inputCostPerM", 0.0) } catch (_: Exception) { 0.0 }
+        priceOutputPerM = try { JSONObject(configJson).optDouble("outputCostPerM", 0.0) } catch (_: Exception) { 0.0 }
         database?.let { db ->
             db.upsertSession(taskId, prompt.take(60))
-            db.insertMessage(taskId, "user", prompt, true)
+            // 任务 26：图片附件随用户消息落盘（受管路径，非 base64），供会话恢复展示。
+            val images = try {
+                val arr = JSONObject(configJson).optJSONArray("userImageFiles") ?: JSONArray()
+                val kept = JSONArray()
+                for (i in 0 until arr.length()) {
+                    arr.optString(i)
+                        .takeIf { it.isNotBlank() && ChatImages.isManaged(context, it) }
+                        ?.let { kept.put(it) }
+                }
+                kept
+            } catch (_: Exception) {
+                JSONArray()
+            }
+            db.insertMessage(taskId, "user", prompt, true, images.toString())
         }
         syncMcpServers(configJson)
-        // 注入降级状态（commit 2）：上次任务经 degrade_snapshot 落盘的快照，
-        // 让 Rust core 跨任务延续端点质量记忆（非法/缺失回退 Full，安全默认）。
-        val degradeJson = try {
-            val prefs = context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
-            prefs.getString("degrade_state", null)
+        return runNative(taskId, prompt, configJson)
+    }
+
+    /**
+     * 从循环光标续跑挂起任务（任务 27/43）：不写入新的 user 消息，
+     * core 用检查点 messages 续跑；无断点时显式报错（不静默新开空任务）。
+     */
+    fun resume(taskId: String, configJson: String): String {
+        if (!libLoaded) {
+            return "ERROR: Rust Core 库 libyaya_core_jni.so 未加载（需 scripts/build-android.sh 交叉编译）"
+        }
+        val prefs = try {
+            context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
         } catch (_: Exception) {
             null
         }
-        val configWithDegrade = if (degradeJson.isNullOrEmpty()) {
+        val loopJson = try { prefs?.getString("loop_state", null) } catch (_: Exception) { null }
+        if (loopJson.isNullOrEmpty()) {
+            return "ERROR: 当前没有可恢复的任务断点"
+        }
+        currentSessionId = taskId
+        assistantBuffer.setLength(0)
+        usageBuffer.clear()
+        priceInputPerM = try { JSONObject(configJson).optDouble("inputCostPerM", 0.0) } catch (_: Exception) { 0.0 }
+        priceOutputPerM = try { JSONObject(configJson).optDouble("outputCostPerM", 0.0) } catch (_: Exception) { 0.0 }
+        syncMcpServers(configJson)
+        if (libLoaded) nativeClearSuspend()
+        return runNative(taskId, "", configJson)
+    }
+
+    /** 请求挂起当前任务（下一个循环边界保存检查点并暂停，不丢弃）。 */
+    fun suspend() {
+        if (libLoaded) nativeSuspend()
+    }
+
+    /** 是否存在可恢复的任务断点（任务 27：冷启动后恢复“已暂停”状态）。 */
+    fun hasPendingTask(): Boolean = try {
+        val prefs = context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
+        !prefs.getString("loop_state", null).isNullOrEmpty()
+    } catch (_: Exception) {
+        false
+    }
+
+    /** 丢弃断点（用户明确放弃暂停任务 / 回滚检查点）。 */
+    fun clearPendingTask() {
+        try {
+            context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
+                .edit().remove("loop_state").apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    // 注入降级状态（commit 2）与循环光标（任务 43）：上次任务落盘的快照，
+    // 让 Rust core 跨任务延续端点质量记忆（非法/缺失回退 Full，安全默认），
+    // 并从断点续跑（已执行工具不重复）。
+    private fun runNative(taskId: String, prompt: String, configJson: String): String {
+        val prefs = try {
+            context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
+        } catch (_: Exception) {
+            null
+        }
+        val degradeJson = try { prefs?.getString("degrade_state", null) } catch (_: Exception) { null }
+        val loopJson = try { prefs?.getString("loop_state", null) } catch (_: Exception) { null }
+        val configWithState = if (degradeJson.isNullOrEmpty() && loopJson.isNullOrEmpty()) {
             configJson
         } else {
             try {
                 val obj = JSONObject(configJson)
-                obj.put("degradeState", JSONArray(degradeJson))
+                if (!degradeJson.isNullOrEmpty()) obj.put("degradeState", JSONArray(degradeJson))
+                if (!loopJson.isNullOrEmpty()) obj.put("loopState", JSONObject(loopJson))
                 obj.toString()
             } catch (_: Exception) {
                 configJson
             }
         }
-        return nativeRunLoop(taskId, prompt, configWithDegrade, this)
+        return nativeRunLoop(taskId, prompt, configWithState, this)
     }
 
     /** 按配置启停 stdio MCP 服务器；仅 stdio 受支持（AGENTS.md R10）。 */
@@ -353,13 +434,35 @@ class AgentHost(
                         .putString("degrade_state", ev.optString("state"))
                         .apply()
                 }
+                "loop_state" -> {
+                    // 循环光标检查点（任务 43）：工具执行后 core 发来，落盘供下次 run 断点续跑。
+                    context.getSharedPreferences("agent_state", android.content.Context.MODE_PRIVATE)
+                        .edit()
+                        .putString("loop_state", ev.optString("state"))
+                        .apply()
+                }
                 "token" -> {
                     assistantBuffer.append(ev.optString("text"))
                 }
                 "usage" -> {
-                    // 存入 messages 表供统计面板聚合（任务 17）。
-                    val total = ev.optInt("total_tokens", 0)
-                    if (total > 0) db.insertMessage(sid, "usage", total.toString(), true)
+                    // 任务 30：缓冲明细（prompt/completion/cached/耗时/费用），任务收尾时落库。
+                    val prompt = ev.optInt("prompt_tokens", 0)
+                    val completion = ev.optInt("completion_tokens", 0)
+                    val total = ev.optInt("total_tokens", prompt + completion)
+                    if (total > 0) {
+                        val cost = (prompt * priceInputPerM + completion * priceOutputPerM) / 1_000_000.0
+                        usageBuffer.add(
+                            JSONObject().apply {
+                                put("prompt", prompt)
+                                put("completion", completion)
+                                put("total", total)
+                                put("cached", ev.optInt("cached_tokens", 0))
+                                put("duration", ev.optLong("duration_ms", 0L))
+                                put("cost", cost)
+                                put("kind", ev.optString("kind"))
+                            }
+                        )
+                    }
                 }
                 "tool_policy" -> {
                     // 决策链记录（任务 18）：verdict/name/reason 存入 messages 表供复盘。
@@ -369,10 +472,28 @@ class AgentHost(
                     db.insertMessage(sid, "policy", "$verdict: $name — $reason", true)
                 }
                 "done" -> {
+                    // 任务成功收尾：清除断点（无需再恢复），降级快照保留跨任务延续。
+                    context.getSharedPreferences("agent_state", android.content.Context.MODE_PRIVATE)
+                        .edit()
+                        .remove("loop_state")
+                        .apply()
                     flushAssistant()
+                    flushUsage()
+                }
+                "suspended" -> {
+                    // 任务 27：挂起不是终点——保留 loop_state，丢弃本轮未完成的流式输出
+                    // （恢复时 core 会重新生成该轮，避免重复文本入库）。
+                    assistantBuffer.setLength(0)
+                    usageBuffer.clear()
                 }
                 "error" -> {
+                    // 失败是终态：清除断点，避免下一次任务意外续跑失败步骤。
+                    context.getSharedPreferences("agent_state", android.content.Context.MODE_PRIVATE)
+                        .edit()
+                        .remove("loop_state")
+                        .apply()
                     flushAssistant()
+                    flushUsage()
                     db.insertMessage(sid, "system", "错误: ${ev.optString("message")}", false)
                 }
                 // state / tool_policy / usage / approval_request 不落库。
@@ -390,6 +511,25 @@ class AgentHost(
         if (text.isEmpty()) return
         db.insertMessage(sid, "assistant", text, true)
         db.touchSession(sid)
+    }
+
+    /** 写入缓冲的 usage 明细（任务 30）；assistant 已先落库，恢复时按顺序挂到上一条回复。 */
+    private fun flushUsage() {
+        val sid = currentSessionId ?: return
+        val db = database ?: return
+        usageBuffer.forEach { u ->
+            db.insertUsage(
+                sessionId = sid,
+                promptTokens = u.optInt("prompt"),
+                completionTokens = u.optInt("completion"),
+                totalTokens = u.optInt("total"),
+                cachedTokens = u.optInt("cached"),
+                durationMs = u.optLong("duration"),
+                costUsd = u.optDouble("cost", 0.0),
+                kind = u.optString("kind").takeIf { it.isNotBlank() },
+            )
+        }
+        usageBuffer.clear()
     }
 
     /** 最近会话 JSON（供 Dart 重启恢复）；无会话返回 null。 */
@@ -411,14 +551,24 @@ class AgentHost(
     /** 指定会话 JSON（含消息）；不存在返回 null。 */
     fun sessionJson(id: String): String? = database?.sessionJson(id)
 
-    /** 会话检查点列表 JSON：`[{messages:[...]}]`，新 → 旧。 */
+    /** 会话检查点列表 JSON：`[{id,createdAt,messages:[...]}]`，新 → 旧。 */
     fun checkpointsJson(sessionId: String): String {
         val arr = JSONArray()
-        database?.checkpointMessagesList(sessionId)?.forEach { j ->
-            arr.put(JSONObject().apply { put("messages", JSONArray(j)) })
+        database?.checkpointRecords(sessionId)?.forEach { (id, createdAt, j) ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", id)
+                    put("createdAt", createdAt)
+                    put("messages", JSONArray(j))
+                }
+            )
         }
         return arr.toString()
     }
+
+    /** 回滚到指定检查点；返回回滚后的消息 JSON，检查点不存在返回 null。 */
+    fun restoreCheckpoint(sessionId: String, checkpointId: Long): String? =
+        database?.restoreToCheckpoint(sessionId, checkpointId)
 
     /** 供 Rust 列出 MCP 工具：`{"ok":true,"tools":[...]}` 或 `{"ok":false,"message":...}`。 */
     fun mcpListTools(): String =

@@ -107,6 +107,100 @@ pub fn tool_schema(specs: &[ToolSpec]) -> Value {
     )
 }
 
+/// 按 `ToolSpec.parameters`（JSON Schema）校验 tool_call 的 arguments（4C-2 行为观测）。
+/// 只覆盖内置/平台工具 schema 实际使用的子集：object 容器、required、properties 类型、
+/// `additionalProperties: false`、数值 `minimum` / `maximum`。不支持的约束忽略（观测层宁松勿错）。
+/// 纯函数；调用方只发 Notice（仅观测不补偿，补偿在 4C-3）。
+pub fn validate_call_against_schema(spec: &ToolSpec, args: &Value) -> Result<(), String> {
+    let schema = &spec.parameters;
+    let obj = match args {
+        Value::Object(o) => o,
+        _ => return Err(format!("参数应为 object，实际 {}", kind_of(args))),
+    };
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        for key in required.iter().filter_map(|k| k.as_str()) {
+            if !obj.contains_key(key) {
+                return Err(format!("缺少必填字段 `{key}`"));
+            }
+        }
+    }
+    let props = schema.get("properties").and_then(|p| p.as_object());
+    let allow_extra = schema
+        .get("additionalProperties")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    if !allow_extra {
+        if let Some(props) = props {
+            for key in obj.keys() {
+                if !props.contains_key(key) {
+                    return Err(format!("未声明的额外字段 `{key}`"));
+                }
+            }
+        }
+    }
+    if let Some(props) = props {
+        for (key, value) in obj {
+            if let Some(constraint) = props.get(key) {
+                validate_value(constraint, value)
+                    .map_err(|e| format!("字段 `{key}` {e}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn kind_of(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// 单值约束校验：type 匹配（integer 允许 number 的整数值）+ 数值边界。
+fn validate_value(constraint: &Value, value: &Value) -> Result<(), String> {
+    let expected = constraint.get("type").and_then(|t| t.as_str());
+    if let Some(expected) = expected {
+        let ok = match expected {
+            "string" => value.is_string(),
+            "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
+            "array" => value.is_array(),
+            "object" => value.is_object(),
+            _ => true, // 未知类型不校验（宁松勿错）。
+        };
+        if !ok {
+            return Err(format!("类型应为 {expected}，实际 {}", kind_of(value)));
+        }
+        if expected == "integer" && value.is_number() {
+            if let Some(f) = value.as_f64() {
+                if f.fract() != 0.0 {
+                    return Err(format!("类型应为 integer，实际 number({f})"));
+                }
+            }
+        }
+    }
+    if value.is_number() {
+        if let Some(n) = value.as_f64() {
+            if let Some(min) = constraint.get("minimum").and_then(|m| m.as_f64()) {
+                if n < min {
+                    return Err(format!("值 {n} 小于 minimum {min}"));
+                }
+            }
+            if let Some(max) = constraint.get("maximum").and_then(|m| m.as_f64()) {
+                if n > max {
+                    return Err(format!("值 {n} 大于 maximum {max}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 构造 `/chat/completions` 请求体。
 pub fn request_body(req: &GenerateRequest, model: &str, stream: bool) -> Value {
     let messages: Vec<Value> = req.messages.iter().map(message_to_value).collect();
@@ -117,7 +211,11 @@ pub fn request_body(req: &GenerateRequest, model: &str, stream: bool) -> Value {
     });
     if !req.tools.is_empty() {
         body["tools"] = tool_schema(&req.tools);
-        body["tool_choice"] = json!("auto");
+        // 4C-3 行为补偿：Forced 档下可强制 required；默认 auto。
+        body["tool_choice"] = match req.tool_choice.as_deref() {
+            Some(tc) => json!(tc),
+            None => json!("auto"),
+        };
     }
     if let Some(max) = req.max_tokens {
         body["max_tokens"] = json!(max);
@@ -334,11 +432,30 @@ fn parse_usage(v: &Value) -> Option<Usage> {
         .get("total_tokens")
         .and_then(|x| x.as_u64())
         .unwrap_or(prompt + completion);
+    // 任务 30：缓存命中明细（OpenAI 兼容端点常有；缺失为 0）。
+    let cached = v
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
     Some(Usage {
         prompt_tokens: u32::try_from(prompt).unwrap_or(u32::MAX),
         completion_tokens: u32::try_from(completion).unwrap_or(u32::MAX),
         total_tokens: u32::try_from(total).unwrap_or(u32::MAX),
+        cached_tokens: u32::try_from(cached).unwrap_or(u32::MAX),
     })
+}
+
+/// 统一流式解析接口适配（任务 25）：与 Anthropic/Gemini 解析器同接口，供 cloud.rs 分派。
+impl crate::agent::provider::SseParser for ResponseAccumulator {
+    fn feed_line(&mut self, line: &str) -> Result<Option<String>, String> {
+        ResponseAccumulator::feed_line(self, line)
+    }
+
+    fn finish(&mut self, requested_max_tokens: Option<u32>) -> Result<ModelOutput, String> {
+        // 原实现为消费型（self），经 Default::take 适配为 &mut self。
+        std::mem::take(self).finish(requested_max_tokens)
+    }
 }
 
 #[cfg(test)]
@@ -395,6 +512,7 @@ mod tests {
             model: None,
             max_tokens: Some(64),
             stream: true,
+            tool_choice: None,
         };
         let body = request_body(&req, "gpt-4o", true);
         assert_eq!(body["stream"], json!(true));
@@ -405,6 +523,24 @@ mod tests {
             json!("notify")
         );
         assert_eq!(body["messages"][0]["role"], json!("user"));
+    }
+
+    #[test]
+    fn tool_choice_required_overrides_default() {
+        let req = GenerateRequest {
+            messages: vec![Message::user("hi")],
+            tools: vec![ToolSpec {
+                name: "notify".into(),
+                description: "通知".into(),
+                parameters: json!({"type":"object","properties":{}}),
+            }],
+            model: None,
+            max_tokens: None,
+            stream: false,
+            tool_choice: Some("required".into()),
+        };
+        let body = request_body(&req, "gpt-4o", false);
+        assert_eq!(body["tool_choice"], json!("required"));
     }
 
     #[test]
@@ -455,6 +591,19 @@ mod tests {
         assert_eq!(u.prompt_tokens, 10);
         assert_eq!(u.completion_tokens, 5);
         assert_eq!(u.total_tokens, 15);
+        assert_eq!(u.cached_tokens, 0);
+    }
+
+    #[test]
+    fn parses_cached_tokens_from_prompt_details() {
+        let mut acc = ResponseAccumulator::new();
+        acc.feed_line(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":64}}}"#,
+        )
+        .unwrap();
+        acc.feed_line("data: [DONE]").unwrap();
+        let u = acc.finish(None).unwrap().usage.expect("应解析出 usage");
+        assert_eq!(u.cached_tokens, 64);
     }
 
     #[test]
@@ -465,6 +614,7 @@ mod tests {
             model: None,
             max_tokens: None,
             stream: true,
+            tool_choice: None,
         };
         let streamed = request_body(&req, "m", true);
         assert_eq!(streamed["stream_options"]["include_usage"], json!(true));
@@ -564,6 +714,7 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 1024,
             total_tokens: 1034,
+            cached_tokens: 0,
         };
         // 完成数 ≈ max_tokens 且 finish_reason 非 length → 可疑。
         assert!(detect_max_tokens_tamper(Some(1024), Some(&usage), Some("stop")).is_some());

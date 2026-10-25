@@ -6,6 +6,7 @@
 pub mod canary;
 pub mod capability;
 pub mod degrade;
+pub mod eval;
 pub mod events;
 pub mod executor;
 pub mod local_parse;
@@ -14,6 +15,8 @@ pub mod memory;
 pub mod model;
 pub mod openai;
 pub mod permission;
+pub mod pool;
+pub mod provider;
 pub mod recorder;
 pub mod router;
 pub mod run;
@@ -35,6 +38,7 @@ pub use model::ModelBackend;
 pub use router::{Backend, RouteHints};
 
 pub use events::Event;
+pub use events::NoticeTag;
 pub use executor::{Action, ActionExecutor};
 pub use mcp::{McpClient, McpTool};
 pub use model::{
@@ -44,15 +48,21 @@ pub use model::{
 pub use permission::{ApprovalRequest, Approver, Reversibility, RunMode, Verdict};
 pub use memory::MemoryStore;
 pub use workspace::FileAccess;
+pub use pool::{EndpointHealth, EndpointPool, EndpointProfile};
+pub use provider::{ApiProtocol, ApiRequest, AuthStyle, SseParser};
 pub use router::{complexity, route, Complexity};
-pub use run::{run_loop, RunConfig};
+pub use run::{run_loop, ActivitySignal, ActivityTracker, LoopStage, LoopState, RunConfig};
 pub use signals::SignalSlots;
 pub use state::{TaskMachine, TaskState};
-pub use degrade::{DegradeMode, DegradeSignal, DegradeState};
+pub use degrade::{BehaviorDim, BehaviorHistory, DegradeMode, DegradeSignal, DegradeState};
+pub use eval::{evaluate, report_from, EvalReport, EvalSummary};
 
 /// 循环机运行所需的三类平台能力 + 已注册的模型后端。
 pub struct AgentCore {
     backends: HashMap<Backend, Box<dyn ModelBackend>>,
+    /// 多端点实例（任务 25，按 EndpointProfile.id）：池选中端点后优先取实例，
+    /// 缺省回退 `backends`（per-kind 单实例，兼容现状）。
+    pub(crate) endpoint_backends: HashMap<String, Box<dyn ModelBackend>>,
     pub executor: Box<dyn ActionExecutor>,
     /// MCP 客户端（可选）；未注册时工具集仅含内置工具。
     pub mcp: Option<Box<dyn McpClient>>,
@@ -75,6 +85,7 @@ impl AgentCore {
     pub fn new(executor: Box<dyn ActionExecutor>) -> Self {
         AgentCore {
             backends: HashMap::new(),
+            endpoint_backends: HashMap::new(),
             executor,
             mcp: None,
             approver: None,
@@ -111,17 +122,48 @@ impl AgentCore {
         self.backends.insert(backend.backend(), backend);
     }
 
+    /// 注册按端点 id 命名的实例（任务 25 / 42 配套）：多提供商各有独立配置。
+    pub fn register_endpoint(&mut self, endpoint_id: String, backend: Box<dyn ModelBackend>) {
+        self.endpoint_backends.insert(endpoint_id, backend);
+    }
+
+    /// 按端点 id 取实例（只读探测用）。
+    pub fn endpoint_backend(&self, id: &str) -> Option<&Box<dyn ModelBackend>> {
+        self.endpoint_backends.get(id)
+    }
+
+    /// 按端点 id 取可变实例（生成用，任务 25）。
+    pub fn endpoint_backend_mut(&mut self, id: &str) -> Option<&mut Box<dyn ModelBackend>> {
+        self.endpoint_backends.get_mut(id)
+    }
+
+    /// 池中可用的实例 id 集（供路由校验端点 id 与同名后端一致）。
+    pub fn has_endpoint(&self, id: &str) -> bool {
+        self.endpoint_backends.contains_key(id)
+    }
+
     pub fn has_backend(&self, backend: Backend) -> bool {
         self.backends.contains_key(&backend)
     }
 
     /// 由后端注册情况 + 静态信号推导出路由输入。
     pub fn effective_hints(&self) -> RouteHints {
-        let usable = |b: Backend| self.backends.get(&b).map(|m| !m.is_stub()).unwrap_or(false);
+        // 25：多端点实例（endpoint_backends）同样参与可用性判定。
+        let has_kind = |k: Backend| {
+            self.backends.get(&k).is_some()
+                || self.endpoint_backends.values().any(|b| b.backend() == k)
+        };
+        let usable = |b: Backend| {
+            self.backends.get(&b).map(|m| !m.is_stub()).unwrap_or(false)
+                || self
+                    .endpoint_backends
+                    .values()
+                    .any(|m| m.backend() == b && !m.is_stub())
+        };
         RouteHints {
             force: self.hints.force,
-            cloud_ok: self.backends.contains_key(&Backend::Cloud) && !self.signals.network_lost(),
-            desktop_ok: self.backends.contains_key(&Backend::Desktop),
+            cloud_ok: has_kind(Backend::Cloud) && !self.signals.network_lost(),
+            desktop_ok: has_kind(Backend::Desktop),
             local_ok: usable(Backend::Jni),
             network_ok: self.hints.network_ok && !self.signals.network_lost(),
             latency_sensitive: self.hints.latency_sensitive,

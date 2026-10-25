@@ -4,7 +4,8 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- 终端提示符 >_ （白，蓝底由 ic_launcher_background 提供） -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M54,34 a20,20 0 1,0 0.01,0 Z M54,44 a10,10 0 1,1 -0.01,0 Z" />
+        android:pathData="M38,42 L56,54 L38,66 L43,66 L61,54 L43,42 Z M60,70 L74,70 L74,66 L60,66 Z" />
 </vector>

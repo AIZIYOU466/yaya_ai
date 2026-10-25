@@ -10,7 +10,112 @@
 //! 状态持久化在 Android 侧（AGENTS.md R13：Rust Core 不持久化），经
 //! [`DegradeState::snapshot`] / [`DegradeState::from_snapshot`] 与 Kotlin 交换。
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use std::collections::HashMap;
+
+/// 端点归一化 id：`scheme + host（小写）+ 完整 path`，去 trailing slash / query / fragment。
+/// 规则「宁分勿合」：path 大小写保留，分裂只分桶细，合并会让不同端点行为历史互相污染。
+/// 任务 42 的 `EndpointProfile.id` 与任务 43 序列化边界引用本函数（ROADMAP 4C-2）。
+pub fn normalize_endpoint_id(base_url: &str) -> String {
+    let no_frag = base_url.trim().split('#').next().unwrap_or("");
+    let no_query = no_frag.split('?').next().unwrap_or("");
+    let (scheme, rest) = match no_query.split_once("://") {
+        Some((sc, rest)) => (sc.to_ascii_lowercase(), rest),
+        None => (String::new(), no_query),
+    };
+    let (host, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let host = host.to_ascii_lowercase();
+    let path = path.trim_end_matches('/');
+    if scheme.is_empty() {
+        format!("{host}{path}")
+    } else {
+        format!("{scheme}://{host}{path}")
+    }
+}
+
+/// 行为维度（4C-2 定义、4C-3 驱动）：与健康环 `DegradeMode` 正交，
+/// 描述「请求构造上对工具调用的介入强度」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BehaviorDim {
+    /// 无介入（正常 auto）。
+    #[default]
+    Normal,
+    /// 中等介入（如 tool_choice 强化，4C-3 L2）。
+    Boosted,
+    /// 强制介入（如 tool_choice required 仅一轮，4C-3 L3）。
+    Forced,
+}
+
+impl BehaviorDim {
+    pub fn label(self) -> &'static str {
+        match self {
+            BehaviorDim::Normal => "normal",
+            BehaviorDim::Boosted => "boosted",
+            BehaviorDim::Forced => "forced",
+        }
+    }
+
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s {
+            "normal" => Some(BehaviorDim::Normal),
+            "boosted" => Some(BehaviorDim::Boosted),
+            "forced" => Some(BehaviorDim::Forced),
+            _ => None,
+        }
+    }
+}
+
+/// per-endpoint 行为历史（per-endpoint 键控，键为 [`normalize_endpoint_id`] 的结果）。
+/// 序列化边界按 4C-3 最终字段集一次定型（ROADMAP 任务 43 引用）。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct BehaviorHistory {
+    /// 观测到的轮次数（相对信号冷启动门槛：20 轮）。
+    pub rounds: u32,
+    /// 累计工具调用次数（活跃度基线：该端点「正常时」每轮有多少调用）。
+    pub tool_calls: u32,
+    /// 最近强动词命中（裁剪到观测窗口长度）。
+    #[serde(default)]
+    pub strong_verb_hits: Vec<String>,
+    /// 最近意向词命中（裁剪到观测窗口长度）。
+    #[serde(default)]
+    pub intent_hits: Vec<String>,
+    /// 4C-3 强制轮（L3 required）失败连续计数：独立于健康环 `ToolSchema` 计数，
+    /// ≥3 触发一次 canary 仲裁；一次成功清零（现在定型，43 序列化边界按此）。
+    #[serde(default)]
+    pub forced_failure_count: u32,
+    /// 最近一次成功的工具调用名（供观测/复盘定位「最后动作」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool_call: Option<String>,
+    /// 4C-3 仲裁冷却：canary 已触发且通过，同端点不再重复仲裁
+    ///（直到一次成功清零或行为环降级才解除）。
+    #[serde(default)]
+    pub canary_cooling: bool,
+}
+
+impl BehaviorHistory {
+    /// 记录一轮观测；命中列表裁剪到 `window`（观测窗口，ROADMAP 4C-2 = 50）。
+    pub fn note_round(&mut self, tool_calls: u32, strong: Option<&str>, intent: Option<&str>, window: usize) {
+        self.rounds = self.rounds.saturating_add(1);
+        self.tool_calls = self.tool_calls.saturating_add(tool_calls);
+        let push = |v: &mut Vec<String>, s: &str| {
+            v.push(s.to_string());
+            if v.len() > window {
+                v.drain(..v.len() - window);
+            }
+        };
+        if let Some(s) = strong {
+            push(&mut self.strong_verb_hits, s);
+        }
+        if let Some(s) = intent {
+            push(&mut self.intent_hits, s);
+        }
+    }
+}
 
 /// 当前生效的降级档位（动态策略，与静态 `Capabilities` 分离）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -107,6 +212,10 @@ pub struct DegradeState {
     probing: bool,
     /// 轻度信号（5xx）触发的低置信标记，仅通知不改档。
     pub low_confidence: bool,
+    /// 行为维度（4C-2 定义、4C-3 驱动）：与健康环正交的请求介入强度。
+    behavior_dim: BehaviorDim,
+    /// per-endpoint 行为历史（键为 [`normalize_endpoint_id`] 结果；无 base_url 用 "default" 桶）。
+    behavior_history: HashMap<String, BehaviorHistory>,
 }
 
 impl DegradeState {
@@ -116,6 +225,50 @@ impl DegradeState {
 
     pub fn mode(&self) -> DegradeMode {
         self.mode
+    }
+
+    pub fn behavior_dim(&self) -> BehaviorDim {
+        self.behavior_dim
+    }
+
+    /// 行为维度切换（4C-3 补偿层驱动；Forced→Boosted→Normal 回落也经此）。
+    pub fn set_behavior_dim(&mut self, dim: BehaviorDim) {
+        self.behavior_dim = dim;
+    }
+
+    /// 只读访问 per-endpoint 行为历史（不存在返回 `None`，不建桶——读不应有副作用）。
+    pub fn behavior_for(&self, endpoint_id: &str) -> Option<&BehaviorHistory> {
+        self.behavior_history.get(endpoint_id)
+    }
+
+    /// 可变访问（不存在则建桶），供轮次观测写入。
+    pub fn behavior_for_mut(&mut self, endpoint_id: &str) -> &mut BehaviorHistory {
+        self.behavior_history.entry(endpoint_id.to_string()).or_default()
+    }
+
+    /// 行为环升一档（Normal→Boosted→Forced；Forced 封顶）。返回新档。
+    pub fn escalate_behavior(&mut self) -> BehaviorDim {
+        self.behavior_dim = match self.behavior_dim {
+            BehaviorDim::Normal => BehaviorDim::Boosted,
+            BehaviorDim::Boosted => BehaviorDim::Forced,
+            BehaviorDim::Forced => BehaviorDim::Forced,
+        };
+        self.behavior_dim
+    }
+
+    /// 行为环降一档（Forced→Boosted→Normal；Normal 封顶）。
+    /// 一次成功调用清零该端点 forced_failure_count 与仲裁冷却（跟随健康环「成功清零」语义）。
+    pub fn deescalate_behavior(&mut self, endpoint_id: &str) -> BehaviorDim {
+        self.behavior_dim = match self.behavior_dim {
+            BehaviorDim::Forced => BehaviorDim::Boosted,
+            BehaviorDim::Boosted => BehaviorDim::Normal,
+            BehaviorDim::Normal => BehaviorDim::Normal,
+        };
+        if let Some(h) = self.behavior_history.get_mut(endpoint_id) {
+            h.forced_failure_count = 0;
+            h.canary_cooling = false;
+        }
+        self.behavior_dim
     }
 
     fn idx(sig: DegradeSignal) -> usize {
@@ -211,14 +364,22 @@ impl DegradeState {
     }
 
     /// 持久化快照（供 Kotlin 落盘；损坏时 `from_snapshot` 回退 Full，安全默认）。
+    /// 序列化边界：新字段（5=行为维度、6=行为历史）追加在数组**尾部**，
+    /// 旧消费端按位读前 5 项不受影响；旧快照（5 项）缺新字段回退默认。
     pub fn snapshot(&self) -> Value {
-        Value::Array(vec![
+        let mut arr = vec![
             Value::String(self.mode.label().to_string()),
             Value::Array(self.fail_counts.iter().map(|&c| Value::from(c)).collect()),
             Value::from(self.success_streak),
             Value::from(self.probe_round),
             Value::from(self.low_confidence),
-        ])
+        ];
+        arr.push(Value::String(self.behavior_dim.label().to_string()));
+        arr.push(
+            serde_json::to_value(&self.behavior_history)
+                .unwrap_or_else(|_| Value::Object(serde_json::Map::new())),
+        );
+        Value::Array(arr)
     }
 
     /// 从快照恢复；非法/缺失回退 `Full`（安全默认）。
@@ -238,6 +399,17 @@ impl DegradeState {
             s.success_streak = a.get(2).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
             s.probe_round = a.get(3).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
             s.low_confidence = a.get(4).and_then(|x| x.as_bool()).unwrap_or(false);
+            // 新字段在尾部（5/6）；旧快照缺失 → 保持默认（Normal / 空表）。
+            if let Some(dim) = a.get(5).and_then(|x| x.as_str()).and_then(BehaviorDim::from_label) {
+                s.behavior_dim = dim;
+            }
+            if let Some(obj) = a.get(6).and_then(|x| x.as_object()) {
+                for (k, v) in obj {
+                    if let Ok(h) = serde_json::from_value::<BehaviorHistory>(v.clone()) {
+                        s.behavior_history.insert(k.clone(), h);
+                    }
+                }
+            }
         }
         s.probe_ready = false;
         s.probing = false;
@@ -375,5 +547,130 @@ mod tests {
         // 继续失败仍停留 BareText。
         assert!(!s.note_failure(DegradeSignal::ToolProtocol));
         assert_eq!(s.mode(), DegradeMode::BareText);
+    }
+
+    // ---- 4C-2：端点归一化 ----
+
+    #[test]
+    fn normalize_endpoint_id_basic() {
+        assert_eq!(
+            normalize_endpoint_id("https://API.Example.COM/v1/chat?token=x#frag"),
+            "https://api.example.com/v1/chat"
+        );
+        assert_eq!(
+            normalize_endpoint_id("https://api.example.com/"),
+            "https://api.example.com"
+        );
+        // 宁分勿合：path 大小写保留。
+        assert_eq!(
+            normalize_endpoint_id("HTTPS://Api.Example.COM/V1"),
+            "https://api.example.com/V1"
+        );
+    }
+
+    #[test]
+    fn normalize_endpoint_id_no_scheme_and_empty() {
+        assert_eq!(normalize_endpoint_id("api.example.com:8080/v1/"), "api.example.com:8080/v1");
+        assert_eq!(normalize_endpoint_id(""), "");
+        // 不同端点不得合并到同一桶。
+        assert_ne!(
+            normalize_endpoint_id("https://a.example.com"),
+            normalize_endpoint_id("https://b.example.com")
+        );
+    }
+
+    // ---- 4C-2：行为维度 / 行为历史 / 快照尾部追加 ----
+
+    #[test]
+    fn behavior_dim_default_is_normal() {
+        assert_eq!(DegradeState::new().behavior_dim(), BehaviorDim::Normal);
+        assert_eq!(BehaviorDim::Forced.label(), "forced");
+        assert_eq!(BehaviorDim::from_label("boosted"), Some(BehaviorDim::Boosted));
+        assert_eq!(BehaviorDim::from_label("?"), None);
+    }
+
+    #[test]
+    fn behavior_history_note_round_counts_and_caps_window() {
+        let mut h = BehaviorHistory::default();
+        for i in 0..5 {
+            h.note_round(
+                if i % 2 == 0 { 1 } else { 0 },
+                Some("已执行"),
+                if i == 0 { Some("让我") } else { None },
+                3,
+            );
+        }
+        assert_eq!(h.rounds, 5);
+        assert_eq!(h.tool_calls, 3);
+        // 命中列表裁剪到窗口长度（保留最近 window 条）。
+        assert_eq!(h.strong_verb_hits.len(), 3);
+        assert_eq!(h.intent_hits, vec!["让我".to_string()]);
+    }
+
+    #[test]
+    fn behavior_fields_roundtrip_in_snapshot_tail() {
+        let mut s = DegradeState::new();
+        s.set_behavior_dim(BehaviorDim::Forced);
+        let h = s.behavior_for_mut("https://api.example.com/v1");
+        h.note_round(2, Some("已运行"), Some("让我"), 50);
+        h.forced_failure_count = 2;
+        h.last_tool_call = Some("terminal_exec".into());
+
+        let snap = s.snapshot();
+        // 新字段在数组尾部（5/6），前 5 项顺序不变。
+        let arr = snap.as_array().unwrap();
+        assert_eq!(arr.len(), 7);
+        assert_eq!(arr[5].as_str(), Some("forced"));
+        assert!(arr[6].is_object());
+
+        let r = DegradeState::from_snapshot(&snap);
+        assert_eq!(r.behavior_dim(), BehaviorDim::Forced);
+        let rh = r.behavior_for("https://api.example.com/v1").unwrap();
+        assert_eq!(rh.rounds, 1);
+        assert_eq!(rh.tool_calls, 2);
+        assert_eq!(rh.forced_failure_count, 2);
+        assert_eq!(rh.last_tool_call.as_deref(), Some("terminal_exec"));
+    }
+
+    #[test]
+    fn legacy_five_element_snapshot_defaults_behavior() {
+        // 旧格式快照（5 项）应正常解析，新字段回退默认。
+        let old = serde_json::json!(["no_tools", [1, 2, 0, 0, 0], 3, 1, false]);
+        let r = DegradeState::from_snapshot(&old);
+        assert_eq!(r.mode(), DegradeMode::NoTools);
+        assert_eq!(r.behavior_dim(), BehaviorDim::Normal);
+        assert!(r.behavior_for("anything").is_none());
+    }
+
+    // ---- 4C-3：行为环升降档与成功清零 ----
+
+    #[test]
+    fn behavior_escalate_deescalate_and_clear_on_success() {
+        let mut s = DegradeState::new();
+        assert_eq!(s.escalate_behavior(), BehaviorDim::Boosted);
+        assert_eq!(s.escalate_behavior(), BehaviorDim::Forced);
+        assert_eq!(s.escalate_behavior(), BehaviorDim::Forced); // 封顶
+        let h = s.behavior_for_mut("ep");
+        h.forced_failure_count = 3;
+        h.canary_cooling = true;
+        // 一次成功调用降一档并清零计数与仲裁冷却。
+        assert_eq!(s.deescalate_behavior("ep"), BehaviorDim::Boosted);
+        let h = s.behavior_for("ep").unwrap();
+        assert_eq!(h.forced_failure_count, 0);
+        assert!(!h.canary_cooling);
+        assert_eq!(s.deescalate_behavior("ep"), BehaviorDim::Normal);
+        assert_eq!(s.deescalate_behavior("ep"), BehaviorDim::Normal); // 封顶
+    }
+
+    #[test]
+    fn canary_cooling_roundtrips_in_snapshot_tail() {
+        let mut s = DegradeState::new();
+        s.behavior_for_mut("ep").canary_cooling = true;
+        let r = DegradeState::from_snapshot(&s.snapshot());
+        assert!(r.behavior_for("ep").unwrap().canary_cooling);
+        // 旧快照（无该字段）回退默认 false。
+        let old = serde_json::json!(["full", [0, 0, 0, 0, 0], 0, 0, false, "boosted", {"ep": {"rounds": 3, "tool_calls": 1}}]);
+        let r2 = DegradeState::from_snapshot(&old);
+        assert!(!r2.behavior_for("ep").unwrap().canary_cooling);
     }
 }

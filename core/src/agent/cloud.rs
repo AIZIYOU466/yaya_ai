@@ -11,15 +11,16 @@
 
 use futures::StreamExt;
 use reqwest::Client;
-use serde_json::Value;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
 use crate::agent::degrade::DegradeSignal;
 use crate::agent::model::{BackendError, FailureKind, GenerateRequest, ModelBackend, ModelOutput};
 use crate::agent::openai::{
-    backoff_delay, classify_status, pick_timeout, request_body, ResponseAccumulator, TimeoutStage,
-    MAX_ATTEMPTS,
+    backoff_delay, classify_status, pick_timeout, ResponseAccumulator, TimeoutStage, MAX_ATTEMPTS,
+};
+use crate::agent::provider::{
+    self, AnthropicAccumulator, ApiProtocol, ApiRequest, AuthStyle, GeminiAccumulator, SseParser,
 };
 use crate::agent::router::Backend;
 use crate::agent::signals::SignalSlots;
@@ -65,12 +66,13 @@ fn classify_protocol_err(e: &str) -> (BackendError, bool) {
 
 /// 单次尝试。返回 `(BackendError, body_received)`：`body_received` 表示本尝试是否已收到任何 body 字节，
 /// 供外层判定是否允许重试（未收到字节才可重试，避免重复/乱序 token）。
+/// `P` 为协议解析器（OpenAI / Anthropic / Gemini，任务 25）。
 #[allow(clippy::too_many_arguments)]
-async fn run_attempt(
+async fn run_attempt<P: SseParser + Default>(
     client: &Client,
-    endpoint: &str,
+    base: &str,
     api_key: &str,
-    body: &Value,
+    api_req: &ApiRequest,
     requested_max_tokens: Option<u32>,
     slots: &SignalSlots,
     on_token: &mut dyn FnMut(&str) -> Result<(), String>,
@@ -83,11 +85,19 @@ async fn run_attempt(
             false,
         ));
     }
+    // 协议分派（任务 25）：路径 / 认证头 / 额外头按 ApiProtocol。
+    let url = format!("{}{}", base.trim_end_matches('/'), api_req.path);
+    let mut builder = client.post(&url);
+    builder = match api_req.auth {
+        AuthStyle::Bearer => builder.bearer_auth(api_key),
+        AuthStyle::XApiKey => builder.header("x-api-key", api_key),
+        AuthStyle::GoogApiKey => builder.header("x-goog-api-key", api_key),
+    };
+    for (k, v) in &api_req.extra_headers {
+        builder = builder.header(k.as_str(), v.as_str());
+    }
     // send() 到响应头：首 token 超时兜底（connect_timeout 由 Client 配置）。
-    let resp = timeout(
-        pick_timeout(TimeoutStage::FirstToken),
-        client.post(endpoint).bearer_auth(api_key).json(body).send(),
-    )
+    let resp = timeout(pick_timeout(TimeoutStage::FirstToken), builder.json(&api_req.body).send())
     .await
     .map_err(|_| {
         (
@@ -136,7 +146,7 @@ async fn run_attempt(
     // 200 但 content-type 异常 → 协议污染，不重试。
     check_content_type(resp.headers()).map_err(|e| (e, false))?;
 
-    let mut acc = ResponseAccumulator::new();
+    let mut acc = P::default();
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut first_chunk = true;
@@ -220,7 +230,8 @@ async fn run_attempt(
 }
 
 pub struct CloudBackend {
-    endpoint: String,
+    base: String,
+    protocol: ApiProtocol,
     api_key: String,
     model: String,
     client: Client,
@@ -229,10 +240,22 @@ pub struct CloudBackend {
 }
 
 impl CloudBackend {
+    /// OpenAI 兼容协议（默认，中转站兼容）。
     pub fn new(
         base_url: &str,
         api_key: &str,
         model: &str,
+        slots: Arc<SignalSlots>,
+    ) -> Result<Self, String> {
+        Self::new_with_protocol(base_url, api_key, model, ApiProtocol::OpenAi, slots)
+    }
+
+    /// 指定上游协议族（任务 25：OpenAI / Anthropic / Gemini）。
+    pub fn new_with_protocol(
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        protocol: ApiProtocol,
         slots: Arc<SignalSlots>,
     ) -> Result<Self, String> {
         let base = base_url.trim().trim_end_matches('/');
@@ -248,7 +271,8 @@ impl CloudBackend {
             .build()
             .map_err(|e| format!("tokio runtime 创建失败: {e}"))?;
         Ok(CloudBackend {
-            endpoint: format!("{base}/chat/completions"),
+            base: base.to_string(),
+            protocol,
             api_key: api_key.to_string(),
             model: model.to_string(),
             client,
@@ -268,29 +292,59 @@ impl ModelBackend for CloudBackend {
         req: &GenerateRequest,
         on_token: &mut dyn FnMut(&str) -> Result<(), String>,
     ) -> Result<ModelOutput, BackendError> {
-        let body: Value = request_body(req, &self.model, req.stream);
+        // 协议分派（任务 25）：请求构造按族（OpenAI/Anthropic/Gemini），传输复用同一防御层。
+        let api_req = provider::build_request(self.protocol, req, &self.model);
         let client = self.client.clone();
-        let endpoint = self.endpoint.clone();
+        let base = self.base.clone();
         let api_key = self.api_key.clone();
         let requested_max_tokens = req.max_tokens;
         let slots = self.slots.clone();
+        let protocol = self.protocol;
 
         self.rt.block_on(async move {
             let mut attempt = 0u32;
             let mut body_received = false;
             loop {
                 attempt += 1;
-                match run_attempt(
-                    &client,
-                    &endpoint,
-                    &api_key,
-                    &body,
-                    requested_max_tokens,
-                    &slots,
-                    on_token,
-                )
-                .await
-                {
+                let res = match protocol {
+                    ApiProtocol::OpenAi => {
+                        run_attempt::<ResponseAccumulator>(
+                            &client,
+                            &base,
+                            &api_key,
+                            &api_req,
+                            requested_max_tokens,
+                            &slots,
+                            on_token,
+                        )
+                        .await
+                    }
+                    ApiProtocol::Anthropic => {
+                        run_attempt::<AnthropicAccumulator>(
+                            &client,
+                            &base,
+                            &api_key,
+                            &api_req,
+                            requested_max_tokens,
+                            &slots,
+                            on_token,
+                        )
+                        .await
+                    }
+                    ApiProtocol::Gemini => {
+                        run_attempt::<GeminiAccumulator>(
+                            &client,
+                            &base,
+                            &api_key,
+                            &api_req,
+                            requested_max_tokens,
+                            &slots,
+                            on_token,
+                        )
+                        .await
+                    }
+                };
+                match res {
                     Ok(out) => return Ok(out),
                     Err((err, got_body)) => {
                         body_received |= got_body;

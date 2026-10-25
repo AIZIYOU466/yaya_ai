@@ -19,6 +19,10 @@ pub struct SignalSlots {
     pub app_background: AtomicBool,
     /// 系统省电模式。置位时跳过金丝雀等额外请求（降频健康探测）。
     pub power_save: AtomicBool,
+    /// 用户主动挂起（任务 27）：置位时在下一轮开始前保存循环光标并暂停任务，
+    /// 不丢弃当前任务；恢复经 `loop_state` 注入续跑。与 `app_background` 分离，
+    /// 避免用户回到前台时误清除挂起意图。
+    pub suspend_requested: AtomicBool,
 }
 
 impl SignalSlots {
@@ -37,6 +41,18 @@ impl SignalSlots {
     pub fn power_save(&self) -> bool {
         self.power_save.load(Ordering::Relaxed)
     }
+
+    pub fn suspend_requested(&self) -> bool {
+        self.suspend_requested.load(Ordering::Relaxed)
+    }
+
+    pub fn request_suspend(&self) {
+        self.suspend_requested.store(true, Ordering::Relaxed);
+    }
+
+    pub fn clear_suspend(&self) {
+        self.suspend_requested.store(false, Ordering::Relaxed);
+    }
 }
 
 #[cfg(test)]
@@ -49,6 +65,16 @@ mod tests {
         assert!(!s.network_lost());
         assert!(!s.app_background());
         assert!(!s.power_save());
+        assert!(!s.suspend_requested());
+    }
+
+    #[test]
+    fn suspend_request_roundtrip() {
+        let s = SignalSlots::new();
+        s.request_suspend();
+        assert!(s.suspend_requested());
+        s.clear_suspend();
+        assert!(!s.suspend_requested());
     }
 
     #[test]

@@ -127,6 +127,14 @@ tasks.matching { it.name.toLowerCase().contains("nativelibs") }.configureEach {
     dependsOn("buildRustCore")
 }
 
+// 容器为 aarch64，NDK 的 llvm-objcopy 是 linux-x86_64 无法运行；
+// extract*NativeSymbolTables 只产出 .sym 调试元数据，禁用不影响 APK 功能。
+tasks.configureEach { task ->
+    if (task.name == "extractDebugNativeSymbolTables" || task.name == "extractReleaseNativeSymbolTables") {
+        task.enabled = false
+    }
+}
+
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation(platform("androidx.compose:compose-bom:2024.05.00"))
@@ -140,4 +148,6 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2")
     implementation("org.json:json:20240303")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // 备份容器/配置解析为纯 JVM 实现（BackupFormat / PrefXml），用 JVM 单测覆盖往返与防护
+    testImplementation("junit:junit:4.13.2")
 }

@@ -554,6 +554,8 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
     host: JObject,
 ) -> jstring {
     CANCELLED.store(false, Ordering::SeqCst);
+    // 任务 27：新 run（含 resume）开始时清除上一次的挂起意图；恢复任务由 loop_state 驱动。
+    signals().clear_suspend();
 
     let result = catch_unwind(AssertUnwindSafe(|| -> Result<String, String> {
         let _task_id = read_string(&mut env, &task_id)?;
@@ -620,14 +622,51 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
             }));
         }
         #[cfg(feature = "cloud-http")]
-        if !base_url.trim().is_empty() {
-            let cloud = yaya_core::agent::cloud::CloudBackend::new(
-                base_url,
-                api_key,
-                model.unwrap_or("gpt-4o-mini"),
-                signals().clone(),
-            )?;
-            core.register_backend(Box::new(cloud));
+        {
+            // 25 多提供商：`providers` 数组 [{baseUrl, apiKey, model, type}] 每个注册一个
+            // 独立 CloudBackend 实例（按端点 id），并提供端点池；缺省回退旧单端点字段。
+            let providers = config
+                .get("providers")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if providers.is_empty() {
+                if !base_url.trim().is_empty() {
+                    let cloud = yaya_core::agent::cloud::CloudBackend::new(
+                        base_url,
+                        api_key,
+                        model.unwrap_or("gpt-4o-mini"),
+                        signals().clone(),
+                    )?;
+                    core.register_backend(Box::new(cloud));
+                }
+            } else {
+                for p in &providers {
+                    let pbase = p.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("");
+                    if pbase.trim().is_empty() {
+                        continue;
+                    }
+                    let pkey = p.get("apiKey").and_then(|v| v.as_str()).unwrap_or("");
+                    let pmodel = p
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("gpt-4o-mini");
+                    let proto = match p.get("type").and_then(|v| v.as_str()) {
+                        Some("anthropic") => yaya_core::agent::provider::ApiProtocol::Anthropic,
+                        Some("gemini") => yaya_core::agent::provider::ApiProtocol::Gemini,
+                        _ => yaya_core::agent::provider::ApiProtocol::OpenAi,
+                    };
+                    let cloud = yaya_core::agent::cloud::CloudBackend::new_with_protocol(
+                        pbase,
+                        pkey,
+                        pmodel,
+                        proto,
+                        signals().clone(),
+                    )?;
+                    let id = yaya_core::agent::degrade::normalize_endpoint_id(pbase);
+                    core.register_endpoint(id, Box::new(cloud));
+                }
+            }
         }
         #[cfg(not(feature = "cloud-http"))]
         let _ = (base_url, api_key);
@@ -672,6 +711,73 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
             ),
             canary: config.get("canary").and_then(|v| v.as_bool()).unwrap_or(false),
             degrade_state: config.get("degradeState").cloned(),
+            // 43：上次中断的循环光标检查点（平台落盘后注入，从断点续跑）。
+            loop_state: config.get("loopState").cloned(),
+            // 42/25：端点池——多提供商（providers）优先派生（全 Cloud kind），
+            // 缺省用 `endpoints` 字段（[{baseUrl, kind}]，单点/混合配置）。空走原单后端路由。
+            endpoints: {
+                let providers = config
+                    .get("providers")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                if !providers.is_empty() {
+                    providers
+                        .iter()
+                        .filter_map(|p| {
+                            let base = p.get("baseUrl")?.as_str()?;
+                            Some(yaya_core::agent::pool::EndpointProfile::new(
+                                base,
+                                yaya_core::agent::router::Backend::Cloud,
+                            ))
+                        })
+                        .collect()
+                } else {
+                    config
+                        .get("endpoints")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|e| {
+                                    let base = e.get("baseUrl")?.as_str()?;
+                                    let kind = match e.get("kind").and_then(|k| k.as_str())? {
+                                        "jni" => yaya_core::agent::router::Backend::Jni,
+                                        "desktop" => yaya_core::agent::router::Backend::Desktop,
+                                        _ => yaya_core::agent::router::Backend::Cloud,
+                                    };
+                                    Some(yaya_core::agent::pool::EndpointProfile::new(base, kind))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                }
+            },
+            // 25：对话页选中的提供商端点（池选路优先，故障切换后解除）。
+            preferred_endpoint: config
+                .get("preferredEndpoint")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string()),
+            // 4C-2：云端 base_url 经归一化作行为历史桶键（无/空串归 "default"）。
+            base_url: if base_url.trim().is_empty() {
+                None
+            } else {
+                Some(base_url.to_string())
+            },
+            // 26：首条用户消息图片（data URL）。只接受 base64 图片，避免非图片
+            // 载荷被转发给模型端点；UI 侧已压缩为 JPEG。
+            user_images: config
+                .get("userImages")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| s.starts_with("data:image/") && s.contains(";base64,"))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
             ..Default::default()
         };
 
@@ -706,6 +812,23 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
 #[no_mangle]
 pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeCancel(_env: JNIEnv, _this: JObject) {
     CANCELLED.store(true, Ordering::SeqCst);
+}
+
+/// Kotlin: `external fun nativeSuspend()`（任务 27）
+/// 请求挂起：core 在下一轮开始前保存 loop_state 并发 `Event::Suspended`，任务不丢弃。
+#[no_mangle]
+pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeSuspend(_env: JNIEnv, _this: JObject) {
+    signals().request_suspend();
+}
+
+/// Kotlin: `external fun nativeClearSuspend()`（任务 27）
+/// 清除挂起意图（恢复任务前调用；挂起状态本身由 loop_state 表示）。
+#[no_mangle]
+pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeClearSuspend(
+    _env: JNIEnv,
+    _this: JObject,
+) {
+    signals().clear_suspend();
 }
 
 /// Kotlin: `external fun nativeSetNetworkLost(lost: Boolean)`

@@ -41,6 +41,11 @@ pub fn run(
             capabilities: cfg.capabilities,
             canary: false,
             degrade_state: None,
+            base_url: None,
+            loop_state: None,
+            endpoints: vec![],
+            preferred_endpoint: None,
+            user_images: vec![],
         };
         match run_loop(core, &p.prompt, &sub_cfg, on_event) {
             Ok(text) if text.contains(&p.expect) => {}
