@@ -166,7 +166,7 @@ class MainActivity : ComponentActivity(), AgentApi {
             ),
         )
         // 刘海/挖孔屏也伸进去：不设置时该区域停在窗口边缘，顶部露出一条窗口底色带
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val attrs = window.attributes
             attrs.layoutInDisplayCutoutMode =
                 android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES

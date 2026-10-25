@@ -155,7 +155,7 @@ object BackupFormat {
      */
     fun extract(zip: File, destRoot: File): Int {
         destRoot.mkdirs()
-        val rootPath = destRoot.canonicalFile.toPath()
+        val rootPath = destRoot.canonicalFile.path
         var files = 0
         var entries = 0
         var total = 0L
@@ -169,7 +169,11 @@ object BackupFormat {
                     throw BackupException("备份包含非法路径：${entry.name}")
                 }
                 val target = File(destRoot, raw).canonicalFile
-                if (!target.toPath().startsWith(rootPath)) {
+                val targetPath = target.path
+                if (!targetPath.startsWith(rootPath) ||
+                    (targetPath.length > rootPath.length &&
+                        targetPath[rootPath.length] != File.separatorChar)
+                ) {
                     throw BackupException("备份包含越界路径：${entry.name}")
                 }
                 when {
