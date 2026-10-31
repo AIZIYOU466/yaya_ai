@@ -157,7 +157,6 @@ fun GitScreen() {
     LaunchedEffect(Unit) { init() }
 
     val toast: (String) -> Unit = { msg -> scope.launch { snackbar.showSnackbar(msg) } }
-    val refresh = { scope.launch { loadAll() } }
 
     fun git(args: List<String>, then: () -> Unit) {
         scope.launch { gitRun(args); then(); loadAll() }
@@ -200,7 +199,6 @@ fun GitScreen() {
             when (tab) {
                 GitTab.Status -> StatusTab(
                     staged = staged, modified = modified, untracked = untracked,
-                    toast = toast,
                     onDiff = { path, cached -> scope.launch {
                         val m = gitRun(if (cached) listOf("diff", "--cached", "--", path) else listOf("diff", "--", path))
                         if (m.optBoolean("ok").not()) toast(m.optString("message", "无法读取差异"))
@@ -298,7 +296,6 @@ private fun StatusTab(
     staged: List<StatusEntry>,
     modified: List<StatusEntry>,
     untracked: List<StatusEntry>,
-    toast: (String) -> Unit,
     onDiff: (String, Boolean) -> Unit,
     onStage: (String) -> Unit,
     onUnstage: (String) -> Unit,
@@ -319,13 +316,13 @@ private fun StatusTab(
         if (staged.isNotEmpty()) {
             item { SectionHeader("已暂存", onStageAll, "全部取消暂存", onUnstageAll) }
             items(staged, key = { "s${it.path}" }) { e ->
-                StatusRow(e, onDiff = { onDiff(e.path, true) }, onClick = { onUnstage(e.path) }, hint = "点击取消暂存")
+                StatusRow(e, onDiff = { onDiff(e.path, true) }, onClick = { onUnstage(e.path) })
             }
         }
         if (modified.isNotEmpty()) {
             item { SectionHeader("已修改", onStageAll, "全部回退", onRestoreAll) }
             items(modified, key = { "m${it.path}" }) { e ->
-                StatusRow(e, onDiff = { onDiff(e.path, false) }, onClick = { onStage(e.path) }, hint = "点击暂存")
+                StatusRow(e, onDiff = { onDiff(e.path, false) }, onClick = { onStage(e.path) })
             }
             item {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
@@ -338,7 +335,7 @@ private fun StatusTab(
         if (untracked.isNotEmpty()) {
             item { SectionHeader("未跟踪", onStageAll, "全部暂存", onStageAll) }
             items(untracked, key = { "u${it.path}" }) { e ->
-                StatusRow(e, onDiff = null, onClick = { onStage(e.path) }, hint = "点击暂存")
+                StatusRow(e, onDiff = null, onClick = { onStage(e.path) })
             }
         }
         if (staged.isNotEmpty()) {
@@ -371,7 +368,6 @@ private fun StatusRow(
     e: StatusEntry,
     onDiff: (() -> Unit)?,
     onClick: () -> Unit,
-    hint: String,
 ) {
     Row(
         modifier = Modifier

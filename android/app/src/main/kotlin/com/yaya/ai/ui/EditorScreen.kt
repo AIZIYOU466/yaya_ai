@@ -19,11 +19,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Code
-import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.Save
-import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -74,9 +74,6 @@ fun EditorScreen(path: String, onClose: () -> Unit) {
     val undoStack = remember { mutableStateListOf<String>() }
     val redoStack = remember { mutableStateListOf<String>() }
     var confirmClose by remember { mutableStateOf(false) }
-    var closeChoice by remember { mutableStateOf<Int?>(null) } // 1=直接退出 2=保存并退出
-
-    val dirtyText = "${path.substringAfterLast('/')}${if (dirty) "  ·  未保存" else ""}${if (mode == Mode.Preview) "  ·  预览" else ""}"
 
     LaunchedEffect(Unit) {
         val raw = withContext(Dispatchers.IO) { api?.workspaceRead(path) ?: "{}" }
@@ -173,7 +170,7 @@ fun EditorScreen(path: String, onClose: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = { requestClose() }) {
-                Icon(Icons.Filled.ArrowBack, contentDescription = "返回")
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
             }
             Column(Modifier.weight(1f)) {
                 Text(
@@ -197,10 +194,10 @@ fun EditorScreen(path: String, onClose: () -> Unit) {
                 }
             }
             IconButton(onClick = { undo() }, enabled = undoStack.isNotEmpty()) {
-                Icon(Icons.Filled.Undo, contentDescription = "撤销")
+                Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "撤销")
             }
             IconButton(onClick = { redo() }, enabled = redoStack.isNotEmpty()) {
-                Icon(Icons.Filled.Redo, contentDescription = "重做")
+                Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "重做")
             }
             IconButton(onClick = { save() }, enabled = !saving) {
                 if (saving) {

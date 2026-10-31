@@ -331,7 +331,7 @@ fun SettingsScreen() {
         }
         if (importing) {
             LinearProgressIndicator(
-                progress = importProgress ?: 0f,
+                progress = { importProgress ?: 0f },
                 modifier = Modifier.fillMaxWidth(),
             )
             Text(

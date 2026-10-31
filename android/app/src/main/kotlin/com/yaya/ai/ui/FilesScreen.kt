@@ -15,8 +15,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.filled.AccountTree
-import androidx.compose.material.icons.filled.Article
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.DataObject
@@ -444,7 +444,7 @@ private fun NodeIcon(node: FsNode) {
         (if (node.expanded) Icons.Filled.FolderOpen else Icons.Filled.Folder) to Color(0xFF42A5F5)
     } else {
         when (lang) {
-            "markdown" -> Icons.Filled.Article to Color(0xFF42A5F5)
+            "markdown" -> Icons.AutoMirrored.Filled.Article to Color(0xFF42A5F5)
             "json" -> Icons.Filled.DataObject to Color(0xFFFFCA28)
             "shell" -> Icons.Filled.Terminal to Color(0xFF66BB6A)
             "dart" -> Icons.Filled.Code to Color(0xFF42A5F5)

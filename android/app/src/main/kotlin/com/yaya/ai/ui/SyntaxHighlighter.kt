@@ -78,14 +78,14 @@ object SyntaxHighlighter {
     fun render(text: String, lang: String, darkMode: Boolean): AnnotatedString {
         val p = if (darkMode) dark else light
         return when (lang) {
-            "json" -> renderGeneric(text, jsonRe(), p) { m ->
+            "json" -> renderGeneric(text, jsonRe()) { m ->
                 when {
                     m.groupValues[1].isNotEmpty() -> SpanStyle(color = if (text.getOrNull(m.range.last + 1)?.toString()?.trimStart()?.startsWith(":") == true) p.type else p.string)
                     m.groupValues[2].isNotEmpty() -> SpanStyle(color = p.number)
                     else -> SpanStyle(color = p.keyword)
                 }
             }
-            "xml" -> renderGeneric(text, xmlRe(), p) { m ->
+            "xml" -> renderGeneric(text, xmlRe()) { m ->
                 when {
                     m.groupValues[1].isNotEmpty() -> SpanStyle(color = p.comment)
                     m.groupValues[2].isNotEmpty() -> SpanStyle(color = p.string)
@@ -93,7 +93,7 @@ object SyntaxHighlighter {
                     else -> SpanStyle(color = p.attr)
                 }
             }
-            else -> renderGeneric(text, codeRegex(lang), p) { m ->
+            else -> renderGeneric(text, codeRegex(lang)) { m ->
                 when {
                     m.groupValues[1].isNotEmpty() -> SpanStyle(color = p.comment)
                     m.groupValues[2].isNotEmpty() -> SpanStyle(color = p.string)
@@ -107,7 +107,6 @@ object SyntaxHighlighter {
     private fun renderGeneric(
         text: String,
         re: Regex,
-        p: Palette,
         styleOf: (MatchResult) -> SpanStyle?,
     ): AnnotatedString = buildAnnotatedString {
         var last = 0

@@ -49,7 +49,7 @@ class SshClientIntegrationTest {
         Assume.assumeTrue(
             "未设置 YAYA_SSH_TEST_HOST/USER/KEY，跳过真实 sshd 集成测试",
             !host.isNullOrBlank() && !user.isNullOrBlank() && !keyPath.isNullOrBlank() &&
-                File(keyPath!!).isFile,
+                File(keyPath).isFile,
         )
     }
 

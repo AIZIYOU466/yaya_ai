@@ -13,8 +13,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Backup
-import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Folder
@@ -172,7 +172,7 @@ private fun DrawerSheet(tab: Int, onSelect: (Int) -> Unit) {
             modifier = Modifier.padding(horizontal = 20.dp),
         )
         Spacer(Modifier.height(20.dp))
-        DrawerItem(0, "对话", Icons.Filled.Chat, tab, onSelect)
+        DrawerItem(0, "对话", Icons.AutoMirrored.Filled.Chat, tab, onSelect)
         DrawerItem(1, "终端", Icons.Filled.Terminal, tab, onSelect)
         DrawerItem(2, "文件", Icons.Filled.Folder, tab, onSelect)
         DrawerItem(3, "MCP", Icons.Filled.Extension, tab, onSelect)
