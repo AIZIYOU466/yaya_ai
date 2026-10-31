@@ -311,8 +311,28 @@ class AgentHost(
                 "terminal" -> {
                     val command = action.optString("command", "")
                     val timeout = action.optLong("timeout_ms", 30000L)
-                    val (out, code) = ProotManager.runCommandBlockingWithCode(context, command, timeout)
-                    JSONObject().put("ok", true).put("message", out).put("exit_code", code).toString()
+                    // 任务 35：启用远程 SSH 时命令走远端（退出码语义不变，供 ExitCode 验证器断言）。
+                    if (SshHost.isActive(context)) {
+                        TerminalLog.begin(command)
+                        try {
+                            val (out, code) = SshHost.exec(context, command, timeout)
+                            out.lineSequence().forEach { line -> TerminalLog.append(line) }
+                            TerminalLog.end(code)
+                            JSONObject().put("ok", true).put("message", out).put("exit_code", code)
+                                .toString()
+                        } catch (e: Exception) {
+                            TerminalLog.append("[SSH] ${e.message ?: "执行失败"}")
+                            TerminalLog.end(-1)
+                            JSONObject().put("ok", false)
+                                .put("message", "远程 SSH 执行失败：${e.message ?: "未知错误"}")
+                                .toString()
+                        }
+                    } else {
+                        val (out, code) =
+                            ProotManager.runCommandBlockingWithCode(context, command, timeout)
+                        JSONObject().put("ok", true).put("message", out).put("exit_code", code)
+                            .toString()
+                    }
                 }
                 "clipboard_read" ->
                     JSONObject().put("ok", true).put("message", clipboardText()).toString()

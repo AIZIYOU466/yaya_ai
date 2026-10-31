@@ -1,5 +1,7 @@
 package com.yaya.ai.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,13 +22,13 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -45,10 +47,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.KeyboardOptions
 import com.yaya.ai.AgentApi
+import com.yaya.ai.LocalModelFiles
+import com.yaya.ai.LocalModels
+import com.yaya.ai.SshHost
+import com.yaya.ai.SshSettings
 import com.yaya.ai.ui.components.CapsTags
 import com.yaya.ai.ui.components.Tag
 import com.yaya.ai.ui.components.YayaCard
@@ -79,9 +86,18 @@ fun SettingsScreen() {
     var editing by remember { mutableStateOf<ModelProvider?>(null) }
     var deleteTarget by remember { mutableStateOf<ModelProvider?>(null) }
     var modelPath by remember { mutableStateOf("") }
+    var models by remember { mutableStateOf(emptyList<LocalModels.LocalModel>()) }
+    var importing by remember { mutableStateOf(false) }
+    var importProgress by remember { mutableStateOf<Float?>(null) }
+    var deleteModel by remember { mutableStateOf<LocalModels.LocalModel?>(null) }
+    // 任务 35：远程 SSH 执行后端。
+    var ssh by remember { mutableStateOf(SshSettings()) }
+    var sshFingerprint by remember { mutableStateOf<String?>(null) }
+    var sshMessage by remember { mutableStateOf<String?>(null) }
+    var sshTesting by remember { mutableStateOf(false) }
+    var editingSsh by remember { mutableStateOf(false) }
     var mode by remember { mutableStateOf("build") }
     var lang by remember { mutableStateOf("zh") }
-    var saved by remember { mutableStateOf(false) }
     var localModelReady by remember { mutableStateOf(false) }
     var stats by remember { mutableStateOf<JSONObject?>(null) }
     // 任务 32：自定义子代理 + 同轮并行上限。
@@ -101,8 +117,42 @@ fun SettingsScreen() {
         refreshActive()
     }
 
+    // 任务 31：SAF 选文件 → 复制进 filesDir/models/ → 自动选中（路径随 config.modelPath 下发）。
+    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                importing = true
+                importProgress = null
+                val result = withContext(Dispatchers.IO) {
+                    runCatching {
+                        LocalModels.import(context, uri) { copied, total ->
+                            // 回调在 IO 线程；Compose 快照状态写入线程安全，且已按 8MB 节流。
+                            importProgress = if (total > 0) {
+                                (copied.toFloat() / total).coerceIn(0f, 1f)
+                            } else {
+                                null
+                            }
+                        }
+                    }
+                }
+                importing = false
+                importProgress = null
+                result.onSuccess { model ->
+                    models = withContext(Dispatchers.IO) { LocalModels.list(context) }
+                    modelPath = model.path
+                    snackbar.showSnackbar("已导入 ${model.name}（${LocalModelFiles.formatSize(model.size)}）")
+                }.onFailure { e ->
+                    snackbar.showSnackbar(e.message ?: "导入失败")
+                }
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
-        modelPath = prefs.getString(ProviderStore.KEY_MODEL_PATH, "") ?: ""
+        modelPath = withContext(Dispatchers.IO) { LocalModels.reconcileSelection(context) }
+        models = withContext(Dispatchers.IO) { LocalModels.list(context) }
+        ssh = SshHost.load(context)
+        sshFingerprint = SshHost.pinnedFingerprint(context)
         mode = prefs.getString(ProviderStore.KEY_MODE, "build") ?: "build"
         lang = prefs.getString(ProviderStore.KEY_LANG, "zh") ?: "zh"
         localModelReady = api?.localAvailable() == true
@@ -214,26 +264,215 @@ fun SettingsScreen() {
 
         HorizontalDivider()
 
+        // 任务 31：端侧模型文件管理（导入 → filesDir/models/，选择写回 provider store）。
         Text("端侧模型", style = MaterialTheme.typography.titleMedium)
-        OutlinedTextField(
-            value = modelPath,
-            onValueChange = { modelPath = it },
-            label = { Text("模型路径（.gguf，可选）") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
         Text(
-            if (localModelReady) "端侧模型可用" else "端侧模型 STUB（未启用）",
+            "导入 .gguf 文件到应用私有目录并选择；对话页把路径随 config.modelPath 下发。" +
+                "文件不会进备份，卸载即删除。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Button(
-            onClick = {
-                prefs.edit().putString(ProviderStore.KEY_MODEL_PATH, modelPath.trim()).apply()
-                saved = true
+        if (models.isEmpty()) {
+            YayaCard(Modifier.fillMaxWidth()) {
+                Text(
+                    "尚未导入模型文件。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(12.dp),
+                )
+            }
+        }
+        models.forEach { model ->
+            val chosen = model.path == modelPath
+            YayaCard(Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            LocalModels.select(context, model.path)
+                            modelPath = model.path
+                            scope.launch { snackbar.showSnackbar("已选择 ${model.name}") }
+                        }
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Filled.CheckCircle,
+                        contentDescription = if (chosen) "当前端侧模型" else null,
+                        tint = if (chosen) YayaColors.Primary else YayaColors.Outline,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Column(
+                        Modifier.weight(1f).padding(start = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Text(
+                            model.name,
+                            style = MonoSmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            LocalModelFiles.formatSize(model.size) +
+                                if (chosen) " · 使用中" else "",
+                            style = MonoLabel,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    IconButton(onClick = { deleteModel = model }) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "删除模型文件",
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
+                }
+            }
+        }
+        if (importing) {
+            LinearProgressIndicator(
+                progress = importProgress ?: 0f,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                importProgress?.let { "导入中… ${(it * 100).toInt()}%" } ?: "导入中…",
+                style = MonoLabel,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OutlinedButton(
+                onClick = { importLauncher.launch(arrayOf("*/*")) },
+                enabled = !importing,
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                Text(" 导入 .gguf 模型")
+            }
+            if (modelPath.isNotBlank()) {
+                TextButton(onClick = {
+                    LocalModels.clearSelection(context)
+                    modelPath = ""
+                }) { Text("清除选择") }
+            }
+        }
+        Text(
+            when {
+                !localModelReady ->
+                    "端侧推理不可用：当前为 STUB 构建（需 -PenableLlamaCpp=true 且 llama.cpp 源码就位）"
+                modelPath.isBlank() -> "端侧推理可用，但尚未选择模型文件"
+                else -> "端侧推理可用（简单提示词优先走端侧，见 R2 路由）"
             },
-        ) { Text("保存端侧路径") }
-        if (saved) Text("已保存", style = MaterialTheme.typography.bodySmall)
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (modelPath.isNotBlank()) {
+            Text(
+                modelPath,
+                style = MonoLabel,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        HorizontalDivider()
+
+        // 任务 35：远程 SSH 执行后端（terminal_exec + 文件工具；终端页/Git 页仍为本地 proot）。
+        Text("远程 SSH 后端", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "启用后，Agent 的终端命令与文件工具在远端执行（SFTP）；终端页与 Git 页仍为本地 proot。" +
+                "主机密钥首次连接后钉扎，变化时拒绝连接。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        YayaCard(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            when {
+                                !ssh.enabled -> "未启用（命令走本地 proot）"
+                                !ssh.isComplete -> "已启用，但配置不完整"
+                                else -> "${ssh.user}@${ssh.host}:${ssh.port}"
+                            },
+                            style = MonoSmall,
+                            color = if (ssh.enabled && !ssh.isComplete) YayaColors.Warning
+                            else MaterialTheme.colorScheme.onSurface,
+                        )
+                        if (ssh.isComplete) {
+                            Text(
+                                "远端工作区 ${ssh.remoteWorkspace.ifBlank { "/workspace" }} · " +
+                                    if (ssh.auth == SshSettings.AUTH_KEY) "私钥认证" else "密码认证",
+                                style = MonoLabel,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Switch(
+                        checked = ssh.enabled,
+                        onCheckedChange = { enabled ->
+                            val next = ssh.copy(enabled = enabled)
+                            ssh = next
+                            SshHost.save(context, next)
+                            sshMessage = null
+                        },
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { editingSsh = true }) { Text("配置") }
+                    OutlinedButton(
+                        enabled = ssh.isComplete && !sshTesting,
+                        onClick = {
+                            scope.launch {
+                                sshTesting = true
+                                sshMessage = null
+                                val raw = withContext(Dispatchers.IO) { SshHost.test(context, ssh) }
+                                sshTesting = false
+                                val o = runCatching { JSONObject(raw) }.getOrNull()
+                                sshMessage = o?.optString("message")?.ifBlank { null } ?: "测试失败"
+                                val fp = o?.optString("fingerprint").orEmpty()
+                                sshFingerprint = fp.ifEmpty { SshHost.pinnedFingerprint(context) }
+                            }
+                        },
+                    ) {
+                        if (sshTesting) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(14.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        }
+                        Text(if (sshTesting) " 测试中…" else " 测试连接")
+                    }
+                    if (sshFingerprint != null) {
+                        TextButton(onClick = {
+                            SshHost.resetHostKey(context)
+                            sshFingerprint = null
+                            sshMessage = "已重置主机密钥；下次连接会重新记录指纹"
+                        }) { Text("重置主机密钥") }
+                    }
+                }
+                sshMessage?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (it.startsWith("连接成功")) YayaColors.StatusSuccess
+                        else YayaColors.Warning,
+                    )
+                }
+                sshFingerprint?.let {
+                    Text(
+                        it,
+                        style = MonoLabel,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
 
         HorizontalDivider()
 
@@ -392,6 +631,46 @@ fun SettingsScreen() {
         )
     }
 
+    if (editingSsh) {
+        SshEditorDialog(
+            initial = ssh,
+            onDismiss = { editingSsh = false },
+            onSave = { updated ->
+                SshHost.save(context, updated)
+                ssh = updated
+                sshFingerprint = SshHost.pinnedFingerprint(context)
+                sshMessage = null
+                editingSsh = false
+                scope.launch { snackbar.showSnackbar("已保存 SSH 配置") }
+            },
+        )
+    }
+
+    deleteModel?.let { model ->
+        AlertDialog(
+            onDismissRequest = { deleteModel = null },
+            title = { Text("删除模型文件？") },
+            text = {
+                Text(
+                    "将从应用私有目录删除「${model.name}」（${LocalModelFiles.formatSize(model.size)}），" +
+                        "需重新导入才能再使用。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val err = runCatching { LocalModels.delete(context, model) }.exceptionOrNull()
+                    models = LocalModels.list(context)
+                    modelPath = LocalModels.selected(context)
+                    deleteModel = null
+                    scope.launch { snackbar.showSnackbar(err?.message ?: "已删除 ${model.name}") }
+                }) { Text("删除", color = YayaColors.StatusError) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteModel = null }) { Text("取消") }
+            },
+        )
+    }
+
     deleteSubagent?.let { def ->
         AlertDialog(
             onDismissRequest = { deleteSubagent = null },
@@ -410,6 +689,181 @@ fun SettingsScreen() {
             },
         )
     }
+}
+
+/** 远程 SSH 配置弹窗（任务 35）：主机/端口/用户/认证（密码或私钥导入）/远端工作区。 */
+@Composable
+private fun SshEditorDialog(
+    initial: SshSettings,
+    onDismiss: () -> Unit,
+    onSave: (SshSettings) -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var host by remember { mutableStateOf(initial.host) }
+    var port by remember { mutableStateOf(initial.port.toString()) }
+    var user by remember { mutableStateOf(initial.user) }
+    var auth by remember { mutableStateOf(initial.auth) }
+    var password by remember { mutableStateOf(initial.password) }
+    var keyPath by remember { mutableStateOf(initial.keyPath) }
+    var passphrase by remember { mutableStateOf(initial.passphrase) }
+    var workspace by remember {
+        mutableStateOf(initial.remoteWorkspace.ifBlank { "/workspace" })
+    }
+    var importing by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+
+    val keyLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            scope.launch {
+                importing = true
+                val result = withContext(Dispatchers.IO) { runCatching { SshHost.importKey(context, uri) } }
+                importing = false
+                result.onSuccess { path ->
+                    keyPath = path
+                    auth = SshSettings.AUTH_KEY
+                    message = "已导入私钥：${path.substringAfterLast('/')}"
+                }.onFailure { e -> message = e.message ?: "导入私钥失败" }
+            }
+        }
+    }
+
+    val portValue = port.toIntOrNull()
+    val valid = host.isNotBlank() && user.isNotBlank() &&
+        portValue != null && portValue in 1..65535 &&
+        workspace.trim().startsWith("/") &&
+        if (auth == SshSettings.AUTH_KEY) keyPath.isNotBlank() else password.isNotEmpty()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("远程 SSH 后端") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = host,
+                    onValueChange = { host = it },
+                    label = { Text("主机（IP 或域名）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = port,
+                        onValueChange = { port = it.filter(Char::isDigit).take(5) },
+                        label = { Text("端口") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = user,
+                        onValueChange = { user = it },
+                        label = { Text("用户名") },
+                        singleLine = true,
+                        modifier = Modifier.weight(2f),
+                    )
+                }
+                Text("认证方式", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = auth == SshSettings.AUTH_PASSWORD,
+                        onClick = { auth = SshSettings.AUTH_PASSWORD },
+                        label = { Text("密码") },
+                    )
+                    FilterChip(
+                        selected = auth == SshSettings.AUTH_KEY,
+                        onClick = { auth = SshSettings.AUTH_KEY },
+                        label = { Text("私钥") },
+                    )
+                }
+                if (auth == SshSettings.AUTH_PASSWORD) {
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = { Text("密码") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = keyPath.ifBlank { "" },
+                            onValueChange = {},
+                            readOnly = true,
+                            label = { Text("私钥文件") },
+                            placeholder = { Text("从文件选择 OpenSSH / PEM 私钥") },
+                            singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(
+                            enabled = !importing,
+                            onClick = { keyLauncher.launch(arrayOf("*/*")) },
+                        ) { Text(if (importing) "导入中…" else "选择文件") }
+                    }
+                    OutlinedTextField(
+                        value = passphrase,
+                        onValueChange = { passphrase = it },
+                        label = { Text("私钥口令（可选）") },
+                        singleLine = true,
+                        visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                OutlinedTextField(
+                    value = workspace,
+                    onValueChange = { workspace = it },
+                    label = { Text("远端工作区路径（绝对路径）") },
+                    placeholder = { Text("/workspace") },
+                    singleLine = true,
+                    isError = !workspace.trim().startsWith("/"),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "密码/口令明文存于应用私有配置（与 API Key 同口径），备份经加密容器；" +
+                        "文件工具的相对路径以远端工作区为根。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                message?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = YayaColors.Warning,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = valid,
+                onClick = {
+                    onSave(
+                        initial.copy(
+                            host = host.trim(),
+                            port = portValue ?: initial.port,
+                            user = user.trim(),
+                            auth = auth,
+                            password = password,
+                            keyPath = keyPath,
+                            passphrase = passphrase,
+                            remoteWorkspace = workspace.trim().ifBlank { "/workspace" },
+                        )
+                    )
+                },
+            ) { Text("保存") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 /** 子代理卡片（任务 32）：名称/说明/能力 + 启停；自定义代理可编辑/删除。 */

@@ -10,8 +10,11 @@ import java.io.File
  * 所有路径先 `normalize` 再做越界校验（必须以工作区根开头），防目录穿越逃出工作区；
  * 相对路径以工作区根为基准，禁止绝对路径（core 侧工具只传相对路径）。
  */
-class WorkspaceFileAccess(context: Context) {
+class WorkspaceFileAccess(private val context: Context) {
     private val root: File = File(context.filesDir, "workspace").also { it.mkdirs() }
+
+    /** 任务 35：启用远程 SSH 后端时，文件工具读写远端工作区（本地目录保留给文件页/备份）。 */
+    private fun remoteActive(): Boolean = SshHost.isActive(context)
 
     /** 相对工作区根的路径 → 绝对 File；越界/非法返回 null。 */
     private fun resolve(rel: String): File? {
@@ -27,6 +30,15 @@ class WorkspaceFileAccess(context: Context) {
 
     /** 列出目录：`{"ok":true,"content":"..."}`（条目名，目录带 `/` 后缀）。 */
     fun list(path: String): String {
+        if (remoteActive()) {
+            return try {
+                val entries = SshHost.list(context, path)
+                    .joinToString("\n") { if (it.isDir) "${it.name}/" else it.name }
+                ok().put("content", entries).toString()
+            } catch (e: Exception) {
+                err(e.message ?: "列出失败")
+            }
+        }
         val dir = resolve(path) ?: return err("路径越界或非法: $path")
         if (!dir.isDirectory) return err("目录不存在: $path")
         val names = dir.listFiles()?.sortedBy { it.name }?.map { f ->
@@ -37,6 +49,13 @@ class WorkspaceFileAccess(context: Context) {
 
     /** 读取文件：`{"ok":true,"content":"..."}`。 */
     fun read(path: String): String {
+        if (remoteActive()) {
+            return try {
+                ok().put("content", SshHost.read(context, path)).toString()
+            } catch (e: Exception) {
+                err(e.message ?: "读取失败")
+            }
+        }
         val f = resolve(path) ?: return err("路径越界或非法: $path")
         if (!f.isFile) return err("文件不存在: $path")
         if (f.length() > MAX_READ_BYTES) {
@@ -55,6 +74,14 @@ class WorkspaceFileAccess(context: Context) {
         val path = req.optString("path")
         val content = req.optString("content")
         val overwrite = req.optBoolean("overwrite", true)
+        if (remoteActive()) {
+            return try {
+                val created = SshHost.write(context, path, content, overwrite)
+                ok().put("created", created).toString()
+            } catch (e: Exception) {
+                err(e.message ?: "写入失败")
+            }
+        }
         val f = resolve(path) ?: return err("路径越界或非法: $path")
         if (f.exists() && !overwrite) return err("文件已存在: $path（overwrite=false）")
         return try {
@@ -70,6 +97,13 @@ class WorkspaceFileAccess(context: Context) {
 
     /** 目标是否存在：`{"ok":true,"exists":true}`。 */
     fun exists(path: String): String {
+        if (remoteActive()) {
+            return try {
+                ok().put("exists", SshHost.exists(context, path)).toString()
+            } catch (e: Exception) {
+                err(e.message ?: "查询失败")
+            }
+        }
         val f = resolve(path) ?: return err("路径越界或非法: $path")
         return ok().put("exists", f.exists()).toString()
     }
@@ -94,6 +128,14 @@ class WorkspaceFileAccess(context: Context) {
 
     /** 删除文件（或空目录）。 */
     fun delete(path: String): String {
+        if (remoteActive()) {
+            return try {
+                SshHost.delete(context, path)
+                ok().toString()
+            } catch (e: Exception) {
+                err(e.message ?: "删除失败")
+            }
+        }
         val f = resolve(path) ?: return err("路径越界或非法: $path")
         if (!f.exists()) return err("文件不存在: $path")
         if (f.isDirectory && f.listFiles()?.isNotEmpty() == true) {
@@ -107,7 +149,7 @@ class WorkspaceFileAccess(context: Context) {
         }
     }
 
-    /** 供 UI 展示工作区根路径。 */
+    /** 供 UI 展示本地工作区根路径（远程模式下文件页仍浏览本地目录，见任务 35 的范围说明）。 */
     fun rootPath(): String = root.absolutePath
 
     private fun ok(): JSONObject = JSONObject().put("ok", true)

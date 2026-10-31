@@ -220,9 +220,10 @@ yaya_ai 已是「内核 + 聊天壳」。阶段 3 的目标是补齐 IDE 型客�
 
 ### Phase 3D：端侧与并行（P1）
 
-- [ ] **31. 端侧推理落地**
+- [ ] **31. 端侧推理落地**（2026-10-31 部分落地：模型文件管理已完成，编译与真机推理未做）
   - 现状：链路齐全（`llama_jni.cpp` + `ModelBridge.kt` + JNI `LocalBackend` + 路由 `local_ok`），但默认 STUB，llama.cpp 未编译，状态 UNVERIFIED
-  - 涉及：`android/app/src/main/cpp/llama_cpp/`（放入 llama.cpp 源码）；`scripts/build-android.sh`（`-PenableLlamaCpp=true`）；`lib/screens/config_screen.dart`（模型文件选择/下载 UI）；`AgentHost`（`localAvailable` + `modelPath` 下发）
+  - 进展（2026-10-31）：模型文件管理落地——`LocalModels.kt`（SAF 选文件 → 复制进 `filesDir/models/`：`.gguf` 校验 / 剩余空间预检 / 先写 `.part` 再改名 / 空文件与复制不完整校验 / 重名加后缀 / 删除限模型目录内并清选中 / `reconcileSelection` 清陈旧路径）+ `LocalModelFiles.kt`（纯 JVM 命名与体积规则）+ 设置页「端侧模型」卡片（导入、选择、体积、删除、导入进度、STUB 状态明示），选择写回既有 `KEY_MODEL_PATH`，`config.modelPath` → JNI `LocalBackend` 链路未改；JVM 单测 6 项、`assembleDebug`、`lintDebug` 通过；Kotlin/Compose 侧 UNVERIFIED（容器内无真机）。**未完成**：llama.cpp 全量编译（R4 仍 UNVERIFIED）、端侧 function-calling 真机验证。
+  - 涉及：`android/app/src/main/cpp/llama_cpp/`（放入 llama.cpp 源码）；`scripts/build-android.sh`（`-PenableLlamaCpp=true`）；`ui/SettingsScreen.kt`（端侧模型导入/选择，已落地）；`AgentHost`（`localAvailable` + `modelPath` 下发，已接线）
   - 功能：真机验证 llama.cpp 全量构建、.gguf 模型文件管理、端侧 function-calling（`local_parse.rs` 的 `<tool_call>` 解析对真实小模型的可靠性验证）
   - 验收（降级）：llama.cpp 全量编译通过并登记 tag（R4 转 VERIFIED）；`.gguf` 模型路径接入（`ModelBridge.currentModelPath` 有来源）；路由 `local_ok` 分支生效。不追求离线全功能——端侧小模型做工具调用非主路径，其解析准确率并入任务 45 评测基准
 
@@ -250,16 +251,16 @@ yaya_ai 已是「内核 + 聊天壳」。阶段 3 的目标是补齐 IDE 型客�
   - 不含：会话/记忆数据库（运行中覆盖 SQLite 有损坏风险）、rootfs 镜像、工作区同步（SFTP/FTP 未做）
   - 验收：用户可备份配置、工作区与技能并在新设备恢复（Kotlin/Compose 侧 UNVERIFIED，容器内无真机；JVM 单测与 `assembleDebug` 已验证）
 
-- [ ] **35. 远程 SSH 后端**
+- [x] **35. 远程 SSH 后端**（2026-10-31 收尾：实现此前已在工作区落地，本轮补真实 sshd 集成验证 + 文档同步 + 勾选）
   - 参考：AiCode `guide/remote-ssh.md`
-  - 涉及：Kotlin `SshHost.kt`（SSH 连接 + 远程命令执行）；`core/src/agent/router.rs`（desktop 分支改为 SSH 语义或新增 SSH 后端）；`lib/screens/config_screen.dart`（SSH 配置入口）
-  - 功能：工作区与容器在远程服务器，AI 命令执行与文件读写经 SSH
-  - 备注：替代 R2 中保留但未实现的 desktop gRPC 分支
-  - 验收：用户可连接远程 SSH 服务器作为执行后端
+  - 涉及：Kotlin `SshClient.kt`（JSch 客户端：exec + SFTP + TOFU 主机密钥钉扎，纯 JVM 可单测）+ `SshHost.kt`（配置持久化/连接复用/指纹管理/私钥导入/测试）+ `RemotePaths.kt`（远端路径越界校验）+ `WorkspaceFileAccess.kt`（文件工具接线）+ `AgentHost.kt`（`terminal_exec` 接线）+ `ui/SettingsScreen.kt`（启用/配置弹窗/测试/重置）+ `build.gradle`（`com.github.mwiede:jsch:0.2.24`，锁版因 0.2.25+ 多版本 jar 与 Android 构建链不兼容）
+  - 功能：启用后 Agent 的 `terminal_exec` 与文件工具在远端服务器执行（命令经 SSH exec、文件经 SFTP）；主机密钥 TOFU 钉扎，指纹变化拒绝连接；密码/私钥认证。终端页与 Git 页仍为本地 proot
+  - 范围（与 ROADMAP 旧描述差异）：**不触碰 core 路由**——SSH 只替换平台执行通道（`ActionExecutor`/`FileAccess` 实现），工具语义/路径校验/授权仍由 core 唯一规范源决定；未改用 desktop gRPC 分支，终端页/Git 页保持本地
+  - 验收：容器内搭真实 sshd（127.0.0.1:2222）跑通 `SshClientIntegrationTest`（exec 输出/退出码、SFTP 往返、主机密钥变更拒绝 3 项，`Assume` 无 sshd 时跳过）+ `RemotePathsTest`（5 项）
 
 - [ ] **36. 真机验证与首次发版**
   - 参考：AGENTS.md R17 发版流程
-  - 涉及：真机回归清单（AI 对话 + 终端容器 + MCP / 端侧模型）三条主线；Git Tag 驱动 CI 构建 Release APK
+  - 涉及：真机回归清单 `docs/release-checklist.md`（AI 对话 + 终端容器 + MCP / 端侧模型 三条主线，逐项打勾）；Git Tag 驱动 CI 构建 Release APK
   - 验收：真机通过三条主线验证，打 `v1.0.0` Tag 发布首个正式版
 
 ### Phase 3F：文档债（P2）
@@ -430,6 +431,10 @@ yaya_ai 已是「内核 + 聊天壳」。阶段 3 的目标是补齐 IDE 型客�
 ---
 
 ## 更新记录
+
+- **2026-10-31**：任务 35 收尾（远程 SSH 后端）——实现此前已在工作区落地，本轮补**真实 sshd 集成验证** + 文档同步 + 勾选。工程实现：`SshClient.kt`（JSch 0.2.24 客户端：exec + SFTP + TOFU 主机密钥钉扎，纯 JVM）+ `SshHost.kt`（配置持久化 `flutter.ai_ssh`、连接复用、指纹管理、私钥 SAF 导入、测试）+ `RemotePaths.kt`（远端路径越界校验）+ `WorkspaceFileAccess.kt`（SSH 启用时文件工具走 SFTP）+ `AgentHost.kt`（`terminal_exec` 走远端，退出码语义不变）+ `SettingsScreen.kt`（开关/配置弹窗/测试连接/重置指纹）+ `build.gradle`（jsch 0.2.24，锁版因 0.2.25+ multi-release jar 与 Android 构建链不兼容）。验证：容器内搭真实 openssh sshd（127.0.0.1:2222，sshtest 用户 pubkey）跑通 `SshClientIntegrationTest`（exec 输出/退出码、SFTP 往返、主机密钥变更拒绝 3 项）+ `RemotePathsTest` 5 项；`testDebugUnitTest` 全部 25 项与 `assembleDebug` 通过。范围：SSH 只替换平台执行通道，不碰 core 路由（ROADMAP 旧描述中 core/router 改 SSH 语义未做，保持更干净）；终端页/Git 页仍本地 proot。更新 `docs/README.md` 补「远程 SSH 后端」章节。
+
+- **2026-10-31**：任务 31 部分落地（端侧模型文件管理，非真机部分）——新增 `LocalModels.kt`（SAF `OpenDocument` 选中文件 → 复制进 `filesDir/models/`：`.gguf` 校验、剩余空间预检、先 `.part` 再改名、空文件/不完整复制校验、重名 `-N` 后缀、删除限模型目录内且清选中、`reconcileSelection` 清理陈旧路径，失败一律显式报错）与 `LocalModelFiles.kt`（纯 JVM：基名清洗/非法字符剔除/扩展名与长度限制、重名改写、体积格式化）；设置页「端侧模型」由手填文本框改为模型卡片（导入/选择/体积/删除/导入进度/STUB 状态明示），选择写回 `ProviderStore.KEY_MODEL_PATH`，`config.modelPath` → JNI `LocalBackend` 链路未改。新增 JVM 单测 6 项（`LocalModelFilesTest`，共 17 项 Android 单测全绿），`assembleDebug`、`lintDebug` 通过；Kotlin/Compose 侧 UNVERIFIED（无真机）。未完成：llama.cpp 全量编译（R4 仍 UNVERIFIED）、端侧 function-calling 真机验证。
 
 - **2026-10-31**：任务 32 落地（子代理真并行与自定义）——core：`SubagentDef` 自定义定义 + 内置 `explore` 只读代理 + `RunConfig.tool_allowlist`（只收窄）+ `max_parallel_subagents` + `SubagentFork` 工厂 + `run_subagents_parallel`（scoped 线程、分批、事件按下标确定性重放、无工厂回退顺序）+ `Event::Subagent`；`run.rs` 每轮预派发 subagent 并回填结果，白名单外调用显式拒绝。JNI：`JniSubagentFork` 重建后端与平台 trait、子线程 daemon 挂载、`config.subagents`/`maxParallelSubagents`。Compose：`Subagents.kt` 存储、设置页管理与并行上限、任务卡子代理状态 chip + 子会话弹窗、授权队列锁。core `#[test]` 209（含并发屏障测试与白名单/定义解析测试）+ 契约 7；三 ABI `.so`、`assembleDebug`、`testDebugUnitTest` 通过；Kotlin/Compose UNVERIFIED。
 

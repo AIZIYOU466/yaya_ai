@@ -118,7 +118,9 @@ Kotlin/Compose 侧**不得**重复实现循环、路由、工具层或协议解�
 
 llama.cpp JNI，**默认 STUB**（运行时显式输出桩提示，禁止伪装成成功推理）。
 全量推理需 `-PenableLlamaCpp=true` 且源码就位；当前该路径**未编译验证**（见 AGENTS.md R4）。
-`local_parse.rs` 为 2B-4B 端侧小模型自研 function-calling（不依赖原生 `tool_calls`）。
+`.gguf` 模型在「设置 → 端侧模型」经系统文件选择器导入，复制进应用私有目录 `filesDir/models/`
+（先写 `.part` 再改名、导入前检查剩余空间、重名自动加后缀），选择结果随 `config.modelPath`
+下发；模型文件不进备份。`local_parse.rs` 为 2B-4B 端侧小模型自研 function-calling（不依赖原生 `tool_calls`）。
 
 ## 构建与验证
 
