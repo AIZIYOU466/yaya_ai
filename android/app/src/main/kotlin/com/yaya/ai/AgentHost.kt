@@ -55,6 +55,9 @@ class AgentHost(
     private val approvalLock = Object()
     private var pendingApprovalId: String? = null
     private var pendingApprovalResult: Boolean? = null
+    // 任务 32：并行子代理可能同时请求授权（单任务模型只有一个待确认槽），
+    // 串行化整个「弹窗 + 等待」过程，避免并发请求互相覆盖选择结果。
+    private val approvalQueueLock = Any()
 
     // 持久化状态：当前会话与流式 assistant 文本累积。
     private var currentSessionId: String? = null
@@ -248,7 +251,7 @@ class AgentHost(
      * 返回 `{"allow":bool}`。经事件通道发 `approval_request` 给 Dart，
      * 阻塞等待用户在 UI 上的选择；超时或取消按拒绝处理。
      */
-    fun requestApproval(json: String): String {
+    fun requestApproval(json: String): String = synchronized(approvalQueueLock) {
         val req = try {
             JSONObject(json)
         } catch (e: Exception) {

@@ -20,6 +20,7 @@ use crate::agent::subagent;
 use crate::agent::tools;
 use crate::agent::AgentCore;
 
+#[derive(Clone)]
 pub struct RunConfig {
     pub system_prompt: String,
     pub model: Option<String>,
@@ -57,6 +58,14 @@ pub struct RunConfig {
     /// 首条用户消息附带的图片（任务 26，data URL 数组）：非空时首条消息为
     /// [`Message::user_with_images`]，否则纯文本。断点恢复时图片随 `loop_state` 消息携带。
     pub user_images: Vec<String>,
+    /// 自定义子代理定义（任务 32，平台经 `config.subagents` 下发）：内置 `explore`
+    /// 始终可用，此处为额外定义（同名覆盖内置）。
+    pub subagents: Vec<subagent::SubagentDef>,
+    /// 同轮并行子代理上限（任务 32）：`<=1` 或平台未提供并行环境时顺序递归。
+    pub max_parallel_subagents: usize,
+    /// 当前代理的可见工具白名单（任务 32）：`None` = 全部工具；子代理（如 `explore`
+    /// 只读代理）据此收窄工具集，未在白名单内的调用一律拒绝（只收窄不放宽）。
+    pub tool_allowlist: Option<HashSet<String>>,
 }
 
 impl Default for RunConfig {
@@ -78,6 +87,9 @@ impl Default for RunConfig {
             endpoints: vec![],
             preferred_endpoint: None,
             user_images: vec![],
+            subagents: vec![],
+            max_parallel_subagents: subagent::DEFAULT_MAX_PARALLEL,
+            tool_allowlist: None,
         }
     }
 }
@@ -647,7 +659,8 @@ pub fn run_loop(
         }
     }
     let mut tool_specs = tools::specs();
-    tool_specs.push(subagent::spec());
+    // 32：subagent 规格按当前子代理定义动态生成（列出可用子代理）。
+    tool_specs.extend(subagent::specs(&cfg.subagents));
     if core.memory_store.is_some() {
         tool_specs.extend(crate::agent::memory::specs());
     }
@@ -670,6 +683,10 @@ pub fn run_loop(
                 tag: None,
             })?,
         }
+    }
+    // 32：子代理工具白名单（只辞窄）：未在白名单内的工具不暴露也不可调用（下方统一拒绝）。
+    if let Some(allow) = &cfg.tool_allowlist {
+        tool_specs.retain(|s| allow.contains(&s.name));
     }
 
     if let Err(e) = machine.transition(TaskState::Planning) {
@@ -1048,6 +1065,37 @@ pub fn run_loop(
         // round_schema_failed = 本轮是否发生 schema 失败（成功降档的前置，防把失败调用当成功清零）。
         let mut trigger_canary = false;
         let mut round_schema_failed = false;
+
+        // 32：并行子代理预派发——同一轮的全部 `subagent` 调用先解析并（平台支持时）多线程执行，
+        // 结果按调用下标取回；策略拒绝（PLAN）与 BUILD 授权确认仍在下方逐调用处理，不跳过策略。
+        let mut sub_results: std::collections::HashMap<usize, (bool, String)> =
+            std::collections::HashMap::new();
+        {
+            let sub_calls: Vec<(usize, ToolCall)> = output
+                .tool_calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.function.name == subagent::TOOL_SUBAGENT)
+                .filter(|(_, c)| {
+                    !matches!(
+                        permission::verdict(cfg.mode, &c.function.name),
+                        Verdict::Deny(_)
+                    ) && cfg
+                        .tool_allowlist
+                        .as_ref()
+                        .map_or(true, |a| a.contains(&c.function.name))
+                })
+                .map(|(i, c)| (i, c.clone()))
+                .collect();
+            if !sub_calls.is_empty() {
+                for (i, ok, text) in
+                    subagent::run_subagents_parallel(core, &sub_calls, cfg, on_event)?
+                {
+                    sub_results.insert(i, (ok, text));
+                }
+            }
+        }
+
         for (i, call) in output.tool_calls.iter().enumerate() {
             let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
             on_event(Event::ToolCall {
@@ -1079,7 +1127,19 @@ pub fn run_loop(
                 }
             }
 
-            let v = permission::verdict(cfg.mode, &call.function.name);
+            // 32：子代理工具白名单——只辞窄不放宽（未在白名单内的调用显式拒绝）。
+            let v = if cfg
+                .tool_allowlist
+                .as_ref()
+                .is_some_and(|a| !a.contains(&call.function.name))
+            {
+                Verdict::Deny(format!(
+                    "工具 {} 不在当前代理的工具白名单内",
+                    call.function.name
+                ))
+            } else {
+                permission::verdict(cfg.mode, &call.function.name)
+            };
             let reason = match &v {
                 Verdict::Deny(r) => r.clone(),
                 Verdict::Ask => format!(
@@ -1113,12 +1173,18 @@ pub fn run_loop(
                         .map(|a| a.approve(&req))
                         .unwrap_or(false);
                     if allowed {
-                        execute_call(&mut *core, call, cfg, on_event)
+                        sub_results
+                            .remove(&i)
+                            .map(|(ok, txt)| (ok, txt, None))
+                            .unwrap_or_else(|| execute_call(&mut *core, call, cfg, on_event))
                     } else {
                         (false, "已拒绝：用户未授权执行".to_string(), None)
                     }
                 }
-                Verdict::Allow => execute_call(&mut *core, call, cfg, on_event),
+                Verdict::Allow => sub_results
+                    .remove(&i)
+                    .map(|(ok, txt)| (ok, txt, None))
+                    .unwrap_or_else(|| execute_call(&mut *core, call, cfg, on_event)),
             };
             on_event(Event::ToolResult {
                 name: call.function.name.clone(),
@@ -3116,6 +3182,210 @@ mod tests {
         assert!(events.iter().any(|e| matches!(
             e,
             Event::Usage { kind: Some(k), total_tokens: 13, .. } if k == "compact"
+        )));
+    }
+
+    // ---- 任务 32：子代理并行与工具白名单 ----
+
+    #[test]
+    fn parallel_subagent_calls_run_in_one_round() {
+        struct Fork {
+            steps: Arc<Mutex<VecDeque<ModelOutput>>>,
+        }
+        impl subagent::SubagentFork for Fork {
+            fn fork_env(&self, _cfg: &RunConfig) -> Option<AgentCore> {
+                let mut sub = AgentCore::new(Box::new(NoopExecutor));
+                sub.register_backend(Box::new(CannedBackend {
+                    steps: self.steps.clone(),
+                }));
+                sub.hints = RouteHints {
+                    force: Some(Backend::Cloud),
+                    ..Default::default()
+                };
+                Some(sub)
+            }
+        }
+        struct CannedBackend {
+            steps: Arc<Mutex<VecDeque<ModelOutput>>>,
+        }
+        impl ModelBackend for CannedBackend {
+            fn generate(
+                &mut self,
+                _req: &GenerateRequest,
+                _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+            ) -> Result<ModelOutput, BackendError> {
+                Ok(self.steps.lock().unwrap().pop_front().unwrap_or_default())
+            }
+            fn backend(&self) -> Backend {
+                Backend::Cloud
+            }
+        }
+
+        let sub_calls: Vec<ToolCall> = [("s1", "任务一"), ("s2", "任务二")]
+            .into_iter()
+            .map(|(id, task)| ToolCall {
+                id: id.into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "subagent".into(),
+                    arguments: json!({ "task": task }).to_string(),
+                },
+            })
+            .collect();
+        let steps: Arc<Mutex<VecDeque<ModelOutput>>> = Arc::new(Mutex::new(VecDeque::from(vec![
+            ModelOutput {
+                text: "子代理二结果".into(),
+                tool_calls: vec![],
+                usage: None,
+                warnings: vec![],
+            },
+            ModelOutput {
+                text: "子代理一结果".into(),
+                tool_calls: vec![],
+                usage: None,
+                warnings: vec![],
+            },
+        ])));
+        let (mut core, _choices) = rec_core(vec![
+            ModelOutput {
+                text: String::new(),
+                tool_calls: sub_calls,
+                usage: None,
+                warnings: vec![],
+            },
+            ModelOutput {
+                text: "完成".into(),
+                tool_calls: vec![],
+                usage: None,
+                warnings: vec![],
+            },
+        ]);
+        core.register_subagent_fork(Box::new(Fork {
+            steps: steps.clone(),
+        }));
+        let cfg = RunConfig {
+            max_parallel_subagents: 2,
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let out = run_loop(&mut core, "任务", &cfg, &mut |e| {
+            events.push(e);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(out, "完成");
+        let results: Vec<(bool, String)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::ToolResult { name, ok, content } if name == "subagent" => {
+                    Some((*ok, content.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 2, "两个子代理各回填一条结果: {events:?}");
+        assert!(results.iter().all(|(ok, _)| *ok));
+        let texts: Vec<&String> = results.iter().map(|(_, c)| c).collect();
+        assert!(texts.iter().any(|t| t.contains("子代理一结果")));
+        assert!(texts.iter().any(|t| t.contains("子代理二结果")));
+        let started_ids: std::collections::HashSet<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Subagent { id, phase, .. } if phase == "started" => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let finished = events
+            .iter()
+            .filter(|e| matches!(e, Event::Subagent { phase, .. } if phase == "finished"))
+            .count();
+        assert_eq!(started_ids.len(), 2, "事件流需按子代理 id 标记生命周期");
+        assert_eq!(finished, 2);
+    }
+
+    #[test]
+    fn tool_allowlist_narrows_specs_and_denies_unlisted_calls() {
+        use std::sync::{Arc, Mutex};
+
+        struct CaptureTools {
+            steps: VecDeque<ModelOutput>,
+            tools: Arc<Mutex<Vec<String>>>,
+        }
+        impl ModelBackend for CaptureTools {
+            fn generate(
+                &mut self,
+                req: &GenerateRequest,
+                _on_token: &mut dyn FnMut(&str) -> Result<(), String>,
+            ) -> Result<ModelOutput, BackendError> {
+                if self.tools.lock().unwrap().is_empty() {
+                    let mut tools = self.tools.lock().unwrap();
+                    *tools = req.tools.iter().map(|t| t.name.clone()).collect();
+                }
+                Ok(self.steps.pop_front().unwrap_or_default())
+            }
+            fn backend(&self) -> Backend {
+                Backend::Cloud
+            }
+        }
+
+        let tools = Arc::new(Mutex::new(Vec::new()));
+        let mut core = AgentCore::new(Box::new(NoopExecutor));
+        core.register_backend(Box::new(CaptureTools {
+            steps: VecDeque::from(vec![
+                ModelOutput {
+                    text: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "c1".into(),
+                        kind: "function".into(),
+                        function: FunctionCall {
+                            name: "terminal_exec".into(),
+                            arguments: json!({ "command": "ls" }).to_string(),
+                        },
+                    }],
+                    usage: None,
+                    warnings: vec![],
+                },
+                ModelOutput {
+                    text: "完成".into(),
+                    tool_calls: vec![],
+                    usage: None,
+                    warnings: vec![],
+                },
+            ]),
+            tools: tools.clone(),
+        }));
+        core.hints = RouteHints {
+            force: Some(Backend::Cloud),
+            ..Default::default()
+        };
+        // 只读白名单：terminal_exec / subagent 均不可见，调用被拒绝（不静默执行）。
+        let cfg = RunConfig {
+            tool_allowlist: Some(
+                ["notify", "clipboard_read"]
+                    .into_iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        run_loop(&mut core, "任务", &cfg, &mut |e| {
+            events.push(e);
+            Ok(())
+        })
+        .unwrap();
+
+        let visible = tools.lock().unwrap().clone();
+        assert_eq!(visible, vec!["clipboard_read", "notify"], "请求只暴露白名单工具");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::ToolPolicy { verdict, reason, .. }
+                if verdict == "deny" && reason.contains("白名单")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::ToolResult { name, ok: false, content }
+                if name == "terminal_exec" && content.contains("白名单")
         )));
     }
 }

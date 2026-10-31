@@ -1,6 +1,9 @@
 package com.yaya.ai.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -8,9 +11,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.PlayArrow
@@ -36,6 +41,15 @@ import com.yaya.ai.ui.theme.MonoLabel
 import com.yaya.ai.ui.theme.MonoSmall
 import com.yaya.ai.ui.theme.YayaColors
 
+/** 子代理运行态（任务 32）：由 `Event::Subagent` 事件流推导，点击可查看子会话详情。 */
+data class SubagentBadge(
+    val id: String,
+    val agent: String,
+    val phase: String, // started / finished / failed
+    val task: String = "",
+    val detail: String = "",
+)
+
 /** 任务卡状态（ChatScreen 从事件流推导，纯 Kotlin 不碰 core）。 */
 data class TaskCardState(
     val goal: String = "",
@@ -46,6 +60,7 @@ data class TaskCardState(
     val model: String = "",
     val startedAt: Long = 0L, // 运行开始时间戳（本地计时，不依赖 core）
     val costUsd: Double? = null, // 任务 30：会话累计费用估算（未配置单价时为 null）
+    val subagents: List<SubagentBadge> = emptyList(), // 任务 32：并行子代理状态
 )
 
 /** 任务卡（46 决策核心组件）：目标 + 状态点 + 最近一步 + 用量 + 操作位。 */
@@ -56,6 +71,7 @@ fun TaskCard(
     onResume: () -> Unit,
     onUndo: () -> Unit,
     modifier: Modifier = Modifier,
+    onOpenSubagent: (SubagentBadge) -> Unit = {},
 ) {
     val suspended = state.status == "suspended"
     YayaCard(
@@ -134,6 +150,45 @@ fun TaskCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            // 任务 32：并行子代理状态（点击进入子会话查看任务与结果）。
+            if (state.subagents.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    state.subagents.forEach { badge ->
+                        val running = badge.phase == "started"
+                        val tone = when (badge.phase) {
+                            "failed" -> YayaColors.StatusError
+                            "finished" -> YayaColors.StatusSuccess
+                            else -> YayaColors.StatusRunning
+                        }
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(YayaColors.SurfaceHigh)
+                                .clickable { onOpenSubagent(badge) }
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(tone),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                text = "${badge.agent} · " +
+                                    (if (running) "运行中" else badge.phase),
+                                style = MonoLabel,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
             }
         }
     }

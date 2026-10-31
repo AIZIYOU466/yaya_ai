@@ -79,6 +79,9 @@ pub struct AgentCore {
     pub degrade: DegradeState,
     /// 平台环境信号槽（Android 层写入，core 决策）。
     pub signals: Arc<SignalSlots>,
+    /// 子代理并行环境工厂（任务 32）：平台注入；存在时为每个并行子代理派生独立
+    /// `AgentCore`，缺省为 `None`（子代理回退顺序递归）。
+    pub(crate) subagent_fork: Option<Box<dyn subagent::SubagentFork>>,
 }
 
 impl AgentCore {
@@ -94,6 +97,7 @@ impl AgentCore {
             hints: RouteHints::default(),
             degrade: DegradeState::new(),
             signals: SignalSlots::new(),
+            subagent_fork: None,
         }
     }
 
@@ -110,6 +114,11 @@ impl AgentCore {
     /// 注册工作区文件访问；未注册时文件工具不暴露。
     pub fn register_file_access(&mut self, access: Box<dyn FileAccess>) {
         self.file_access = Some(access);
+    }
+
+    /// 注册子代理并行环境工厂（任务 32）；未注册时子代理回退顺序递归。
+    pub fn register_subagent_fork(&mut self, fork: Box<dyn subagent::SubagentFork>) {
+        self.subagent_fork = Some(fork);
     }
 
     /// 注册 MCP 客户端；未调用则工具集仅含内置工具。

@@ -226,11 +226,12 @@ yaya_ai 已是「内核 + 聊天壳」。阶段 3 的目标是补齐 IDE 型客�
   - 功能：真机验证 llama.cpp 全量构建、.gguf 模型文件管理、端侧 function-calling（`local_parse.rs` 的 `<tool_call>` 解析对真实小模型的可靠性验证）
   - 验收（降级）：llama.cpp 全量编译通过并登记 tag（R4 转 VERIFIED）；`.gguf` 模型路径接入（`ModelBridge.currentModelPath` 有来源）；路由 `local_ok` 分支生效。不追求离线全功能——端侧小模型做工具调用非主路径，其解析准确率并入任务 45 评测基准
 
-- [ ] **32. 子代理真并行与自定义**
-  - 现状：`subagent.rs` 为顺序递归，单线程
-  - 涉及：`core/src/agent/subagent.rs`（多线程并行 + 事件流标记子代理 id）；`core/src/agent/run.rs`（并行调度与结果汇总）；Kotlin `AgentHost`（JNI 多线程回调）；`lib/screens/chat_screen.dart`（子代理状态指示 + 点击进入子会话）
+- [x] **32. 子代理真并行与自定义**（2026-10-31 落地：core `subagent.rs` 重写——`SubagentDef`（`RunConfig.subagents`，camelCase 与平台 JSON 对齐：说明/专属指令/专属模型/工具白名单/步数）+ 内置 `explore` 只读定义（白名单固定文件列/读、记忆列/读、剪贴板读，平台只可启停，覆盖定义按字段合并防夹带）+ `RunConfig.tool_allowlist`（工具集 `retain` 收窄 + 未列入调用显式拒绝，子代理与父级取交集）+ `run_subagents_parallel`（`std::thread::scope` 并发，`max_parallel_subagents` 分批上限 1–8、平台 `SubagentFork` 派生独立 `AgentCore`、子线程事件按调用下标缓冲后确定性重放、无工厂回退顺序递归）+ `Event::Subagent{id,agent,phase,detail}` 标记生命周期；`run.rs` 每轮工具循环前预派发本轮全部 subagent 调用（PLAN 拒绝与白名单外调用不预派发）并按调用下标回填结果，BUILD 授权语义不变；JNI 新增 `JniSubagentFork`（重建同一套平台 trait/本地/多提供商/端点实例/MCP）+ `JniHost::env` 子线程 daemon 挂载 + `config.subagents`/`maxParallelSubagents` 解析；Compose 新增 `Subagents.kt`（SharedPreferences `flutter.ai_subagents` / `flutter.ai_max_parallel`）、设置页子代理卡片与编辑弹窗（名称/说明/模型/指令/工具白名单/步数/启停、并行上限 1–5）、对话页任务卡子代理状态 chip + 点击查看子会话（任务/结果摘要）、`AgentHost.requestApproval` 队列锁串行化并行授权。core `#[test]` 209 + 契约 7；三 ABI `.so` 交叉编译、`assembleDebug`、`testDebugUnitTest`（11 项）通过；Kotlin/Compose 侧 UNVERIFIED（容器内无真机）。
+  - 现状（已解决）：`subagent.rs` 曾为顺序递归，单线程
+  - 涉及：`core/src/agent/subagent.rs`（多线程并行 + 事件流标记子代理 id）；`core/src/agent/run.rs`（并行调度与结果汇总）；Kotlin `AgentHost`（JNI 多线程回调）；Compose `ui/ChatScreen.kt`（子代理状态指示 + 点击进入子会话）
   - 功能：最多 N 个子代理并行、自定义子代理（模型/工具白名单/专属提示词）、内置 Explore 只读代理、设置内启停管理
-  - 验收：主 Agent 可派发多个并行子代理，主会话不阻塞
+  - 限制：proot 容器为单实例，子代理的终端命令仍串行；并行子代理各自持有独立降级/行为态（不共享父任务健康环）
+  - 验收：主 Agent 可派发多个并行子代理，UI 与消息队列不阻塞（父循环等本批结果再生成，符合工具回填语义；子代理事件批次结束后按调用下标回传，保证可重放）；core 测试用屏障证明真并发（顺序执行会超时）。Compose 侧 UNVERIFIED
 
 ### Phase 3E：扩展与成熟度（P2）
 
@@ -429,6 +430,8 @@ yaya_ai 已是「内核 + 聊天壳」。阶段 3 的目标是补齐 IDE 型客�
 ---
 
 ## 更新记录
+
+- **2026-10-31**：任务 32 落地（子代理真并行与自定义）——core：`SubagentDef` 自定义定义 + 内置 `explore` 只读代理 + `RunConfig.tool_allowlist`（只收窄）+ `max_parallel_subagents` + `SubagentFork` 工厂 + `run_subagents_parallel`（scoped 线程、分批、事件按下标确定性重放、无工厂回退顺序）+ `Event::Subagent`；`run.rs` 每轮预派发 subagent 并回填结果，白名单外调用显式拒绝。JNI：`JniSubagentFork` 重建后端与平台 trait、子线程 daemon 挂载、`config.subagents`/`maxParallelSubagents`。Compose：`Subagents.kt` 存储、设置页管理与并行上限、任务卡子代理状态 chip + 子会话弹窗、授权队列锁。core `#[test]` 209（含并发屏障测试与白名单/定义解析测试）+ 契约 7；三 ABI `.so`、`assembleDebug`、`testDebugUnitTest` 通过；Kotlin/Compose UNVERIFIED。
 
 - **2026-10-03**：初版建立，20 任务清单。基于「向 AiCode 靠齐 → 超越 AiCode」两阶段规划。
 - **2026-10-03**：Batch 1 落地 —— 任务 1/3/4/5（core + JNI + Kotlin + Dart）。core 61 测试全过、JNI 编译检查通过；Android UI 侧未真机验证。任务 4 的 UI 仅显示总量，拆分/费用估算留待任务 17。

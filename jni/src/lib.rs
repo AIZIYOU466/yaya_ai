@@ -62,10 +62,13 @@ struct HostInner {
 struct JniHost(Arc<HostInner>);
 
 impl JniHost {
+    /// 取当前线程的 JNIEnv；并行子代理线程由 Rust 侧创建，首次调用时按 daemon 线程挂载
+    /// （任务 32；线程退出由 JVM 自动解挂，不阻塞进程退出）。
     fn env(&self) -> Result<JNIEnv<'_>, String> {
         self.0
             .vm
             .get_env()
+            .or_else(|_| self.0.vm.attach_current_thread_as_daemon())
             .map_err(|e| format!("获取 JNIEnv 失败: {e}"))
     }
 
@@ -181,6 +184,139 @@ impl ActionExecutor for JniHost {
                 msg
             })
         }
+    }
+}
+
+// ── 25 多提供商：配置解析与注册（主循环与并行子代理共用） ──
+
+#[cfg(feature = "cloud-http")]
+#[derive(Clone)]
+struct ProviderCfg {
+    base: String,
+    key: String,
+    model: String,
+    proto: yaya_core::agent::provider::ApiProtocol,
+}
+
+/// 解析 `config.providers`（`[{baseUrl, apiKey, model, type}]`）；type ∈ openai/anthropic/gemini。
+#[cfg(feature = "cloud-http")]
+fn provider_cfgs(config: &Value) -> Vec<ProviderCfg> {
+    config
+        .get("providers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let base = p.get("baseUrl")?.as_str()?.trim();
+                    if base.is_empty() {
+                        return None;
+                    }
+                    Some(ProviderCfg {
+                        base: base.to_string(),
+                        key: p
+                            .get("apiKey")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        model: p
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("gpt-4o-mini")
+                            .to_string(),
+                        proto: match p.get("type").and_then(|v| v.as_str()) {
+                            Some("anthropic") => {
+                                yaya_core::agent::provider::ApiProtocol::Anthropic
+                            }
+                            Some("gemini") => yaya_core::agent::provider::ApiProtocol::Gemini,
+                            _ => yaya_core::agent::provider::ApiProtocol::OpenAi,
+                        },
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 注册云后端：`providers` 非空时每项注册一个端点实例；否则回退旧单端点（per-kind）。
+#[cfg(feature = "cloud-http")]
+fn register_cloud_backends(
+    core: &mut AgentCore,
+    providers: &[ProviderCfg],
+    legacy: Option<&ProviderCfg>,
+) -> Result<(), String> {
+    if providers.is_empty() {
+        if let Some(p) = legacy {
+            let cloud = yaya_core::agent::cloud::CloudBackend::new(
+                &p.base,
+                &p.key,
+                &p.model,
+                signals().clone(),
+            )?;
+            core.register_backend(Box::new(cloud));
+        }
+        return Ok(());
+    }
+    for p in providers {
+        let cloud = yaya_core::agent::cloud::CloudBackend::new_with_protocol(
+            &p.base,
+            &p.key,
+            &p.model,
+            p.proto,
+            signals().clone(),
+        )?;
+        let id = yaya_core::agent::degrade::normalize_endpoint_id(&p.base);
+        core.register_endpoint(id, Box::new(cloud));
+    }
+    Ok(())
+}
+
+/// 并行子代理环境工厂（任务 32）：为每个并行子代理重建一套独立 `AgentCore`，
+/// 平台能力（执行/授权/记忆/文件/MCP）与后端注册与主循环一致。
+struct JniSubagentFork {
+    host: JniHost,
+    #[cfg(feature = "cloud-http")]
+    providers: Vec<ProviderCfg>,
+    #[cfg(feature = "cloud-http")]
+    legacy: Option<ProviderCfg>,
+    local_model_path: Option<String>,
+    mcp_enabled: bool,
+    network_ok: bool,
+}
+
+impl yaya_core::agent::subagent::SubagentFork for JniSubagentFork {
+    fn fork_env(&self, _parent_cfg: &RunConfig) -> Option<AgentCore> {
+        let mut core = AgentCore::new(Box::new(self.host.clone()));
+        core.register_approver(Box::new(JniApprover {
+            host: self.host.clone(),
+        }));
+        core.register_memory_store(Box::new(JniMemoryStore {
+            host: self.host.clone(),
+        }));
+        core.register_file_access(Box::new(JniFileAccess {
+            host: self.host.clone(),
+        }));
+        if let Some(path) = &self.local_model_path {
+            core.register_backend(Box::new(LocalBackend {
+                host: self.host.clone(),
+                model_path: path.clone(),
+            }));
+        }
+        #[cfg(feature = "cloud-http")]
+        if register_cloud_backends(&mut core, &self.providers, self.legacy.as_ref()).is_err() {
+            // 后端配置非法：不静默降级为无后端（该子代理会显式失败）。
+            return None;
+        }
+        if self.mcp_enabled {
+            core.register_mcp(Box::new(JniMcp {
+                host: self.host.clone(),
+            }));
+        }
+        core.hints = RouteHints {
+            network_ok: self.network_ok,
+            ..Default::default()
+        };
+        core.signals = signals().clone();
+        Some(core)
     }
 }
 
@@ -621,53 +757,20 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
                 model_path: model_path.to_string(),
             }));
         }
+        // 25 多提供商：`providers` 数组 [{baseUrl, apiKey, model, type}] 每个注册一个
+        // 独立 CloudBackend 实例（按端点 id）；缺省回退旧单端点字段。
+        // 配置同时交给并行子代理工厂（任务 32），使子代理拥有同一套后端。
         #[cfg(feature = "cloud-http")]
-        {
-            // 25 多提供商：`providers` 数组 [{baseUrl, apiKey, model, type}] 每个注册一个
-            // 独立 CloudBackend 实例（按端点 id），并提供端点池；缺省回退旧单端点字段。
-            let providers = config
-                .get("providers")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            if providers.is_empty() {
-                if !base_url.trim().is_empty() {
-                    let cloud = yaya_core::agent::cloud::CloudBackend::new(
-                        base_url,
-                        api_key,
-                        model.unwrap_or("gpt-4o-mini"),
-                        signals().clone(),
-                    )?;
-                    core.register_backend(Box::new(cloud));
-                }
-            } else {
-                for p in &providers {
-                    let pbase = p.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("");
-                    if pbase.trim().is_empty() {
-                        continue;
-                    }
-                    let pkey = p.get("apiKey").and_then(|v| v.as_str()).unwrap_or("");
-                    let pmodel = p
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("gpt-4o-mini");
-                    let proto = match p.get("type").and_then(|v| v.as_str()) {
-                        Some("anthropic") => yaya_core::agent::provider::ApiProtocol::Anthropic,
-                        Some("gemini") => yaya_core::agent::provider::ApiProtocol::Gemini,
-                        _ => yaya_core::agent::provider::ApiProtocol::OpenAi,
-                    };
-                    let cloud = yaya_core::agent::cloud::CloudBackend::new_with_protocol(
-                        pbase,
-                        pkey,
-                        pmodel,
-                        proto,
-                        signals().clone(),
-                    )?;
-                    let id = yaya_core::agent::degrade::normalize_endpoint_id(pbase);
-                    core.register_endpoint(id, Box::new(cloud));
-                }
-            }
-        }
+        let provider_cfgs = provider_cfgs(&config);
+        #[cfg(feature = "cloud-http")]
+        let legacy_cfg = (!base_url.trim().is_empty()).then(|| ProviderCfg {
+            base: base_url.to_string(),
+            key: api_key.to_string(),
+            model: model.unwrap_or("gpt-4o-mini").to_string(),
+            proto: yaya_core::agent::provider::ApiProtocol::OpenAi,
+        });
+        #[cfg(feature = "cloud-http")]
+        register_cloud_backends(&mut core, &provider_cfgs, legacy_cfg.as_ref())?;
         #[cfg(not(feature = "cloud-http"))]
         let _ = (base_url, api_key);
 
@@ -683,16 +786,44 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
         };
         core.signals = signals().clone();
 
+        // 32：并行子代理环境工厂（平台支持则为每个子代理派生独立 AgentCore）。
+        core.register_subagent_fork(Box::new(JniSubagentFork {
+            host: jhost.clone(),
+            #[cfg(feature = "cloud-http")]
+            providers: provider_cfgs.clone(),
+            #[cfg(feature = "cloud-http")]
+            legacy: legacy_cfg.clone(),
+            local_model_path: (local_available && !model_path.is_empty())
+                .then(|| model_path.to_string()),
+            mcp_enabled,
+            network_ok,
+        }));
+
         let mode = match config.get("mode").and_then(|v| v.as_str()) {
             Some("plan") => RunMode::Plan,
             Some("auto") => RunMode::Auto,
             _ => RunMode::Build,
         };
 
+        // 32：自定义子代理定义 + 同轮并行上限（缺省/非法回退默认值）。
+        let subagents: Vec<yaya_core::agent::subagent::SubagentDef> = config
+            .get("subagents")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let max_parallel_subagents = config
+            .get("maxParallelSubagents")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+            .unwrap_or(yaya_core::agent::subagent::DEFAULT_MAX_PARALLEL)
+            .clamp(1, yaya_core::agent::subagent::MAX_PARALLEL_LIMIT);
+
         let cfg = RunConfig {
             model: model.map(|s| s.to_string()),
             max_steps,
             mode,
+            subagents,
+            max_parallel_subagents,
+            tool_allowlist: None,
             skills_dir: if skills_dir.is_empty() {
                 None
             } else {

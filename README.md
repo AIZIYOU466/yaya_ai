@@ -32,7 +32,7 @@ Rust Agent Core（crate `yaya-core`，唯一规范源）
   ├─ tools.rs      统一工具层（function-calling schema + 派发，含 MCP 命名空间）
   ├─ workspace.rs  工作区文件系统（FileAccess trait + 6 个文件工具）
   ├─ memory.rs     自动记忆（5 个工具 + description 清单注入）
-  ├─ subagent.rs   子代理（顺序递归子循环，独立上下文）
+  ├─ subagent.rs   子代理（同轮并行 + 自定义定义 + 内置 Explore 只读，独立上下文）
   ├─ skill.rs      技能（SKILL.md 扫描与系统提示词注入）
   ├─ openai.rs     OpenAI 兼容协议（含流式 tool_calls 解析）
   ├─ cloud.rs      云端后端（reqwest + rustls，feature `cloud-http`）
@@ -76,7 +76,7 @@ Kotlin/Compose 侧**不得**重复实现循环、路由、工具层或协议解�
 | 剪贴板与通知 | `clipboard_read` / `clipboard_write` / `notify` |
 | 工作区文件 | `file_list` / `file_read` / `file_patch` / `file_write` / `file_edit` / `file_delete` |
 | 自动记忆 | `memory_list` / `memory_read` / `memory_save` / `memory_edit` / `memory_delete` |
-| 子代理 | `subagent`（独立上下文递归子循环，受同一运行模式策略约束） |
+| 子代理 | `subagent`（独立上下文子循环；同轮可并行多个；`agent` 可选 `general` / `explore`(只读) / 自定义；受同一运行模式策略约束） |
 | MCP | `mcp__<server>__<tool>`（stdio，并入统一工具层） |
 
 工作区工具只接受**相对路径**，归一化后校验必须落在工作区内（防目录穿越），
@@ -123,7 +123,7 @@ llama.cpp JNI，**默认 STUB**（运行时显式输出桩提示，禁止伪装�
 ## 构建与验证
 
 ```bash
-# 1. Rust Core（本地可完整验证，199 项测试）
+# 1. Rust Core（本地可完整验证，209 项测试 + 7 项契约）
 cargo test -p yaya-core
 cargo check -p yaya-core --features cloud-http
 

@@ -30,6 +30,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -83,6 +84,11 @@ fun SettingsScreen() {
     var saved by remember { mutableStateOf(false) }
     var localModelReady by remember { mutableStateOf(false) }
     var stats by remember { mutableStateOf<JSONObject?>(null) }
+    // 任务 32：自定义子代理 + 同轮并行上限。
+    var subagents by remember { mutableStateOf(SubagentStore.load(context)) }
+    var maxParallel by remember { mutableStateOf(SubagentStore.maxParallel(context)) }
+    var editingSubagent by remember { mutableStateOf<SubagentConfig?>(null) }
+    var deleteSubagent by remember { mutableStateOf<SubagentConfig?>(null) }
 
     fun refreshActive() {
         active = ProviderStore.active(context, providers)
@@ -252,6 +258,53 @@ fun SettingsScreen() {
 
         HorizontalDivider()
 
+        // 任务 32：子代理（内置 explore 只读，可启停；自定义可指定模型/工具白名单/专属指令）。
+        Text("子代理", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "同一轮可并行派发多个子代理（上限 $maxParallel）；explore 为内置只读代理。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        subagents.forEach { def ->
+            SubagentCard(
+                def = def,
+                onToggle = { enabled ->
+                    subagents = subagents.map { if (it.name == def.name) it.copy(enabled = enabled) else it }
+                    SubagentStore.save(context, subagents)
+                },
+                onEdit = { editingSubagent = def },
+                onDelete = { deleteSubagent = def },
+            )
+        }
+        OutlinedButton(
+            onClick = {
+                editingSubagent = SubagentConfig(name = "")
+            },
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+            Text(" 添加子代理")
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "并行上限",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            (1..SubagentStore.MAX_PARALLEL).forEach { n ->
+                FilterChip(
+                    selected = maxParallel == n,
+                    onClick = {
+                        maxParallel = n
+                        SubagentStore.setMaxParallel(context, n)
+                    },
+                    label = { Text("$n") },
+                )
+            }
+        }
+
+        HorizontalDivider()
+
         Text("语言", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(
@@ -319,6 +372,209 @@ fun SettingsScreen() {
             },
         )
     }
+
+    editingSubagent?.let { initial ->
+        SubagentEditorDialog(
+            initial = initial,
+            existing = subagents,
+            onDismiss = { editingSubagent = null },
+            onSave = { updated ->
+                val exists = subagents.any { it.name == updated.name }
+                subagents = if (exists && initial.name == updated.name) {
+                    subagents.map { if (it.name == updated.name) updated else it }
+                } else {
+                    subagents + updated
+                }
+                SubagentStore.save(context, subagents)
+                editingSubagent = null
+                scope.launch { snackbar.showSnackbar("已保存子代理 ${updated.name}") }
+            },
+        )
+    }
+
+    deleteSubagent?.let { def ->
+        AlertDialog(
+            onDismissRequest = { deleteSubagent = null },
+            title = { Text("删除子代理？") },
+            text = { Text("将删除「${def.name}」的定义；已开始的对话不受影响。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    subagents = subagents.filterNot { it.name == def.name }
+                    SubagentStore.save(context, subagents)
+                    deleteSubagent = null
+                    scope.launch { snackbar.showSnackbar("已删除子代理") }
+                }) { Text("删除", color = YayaColors.StatusError) }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteSubagent = null }) { Text("取消") }
+            },
+        )
+    }
+}
+
+/** 子代理卡片（任务 32）：名称/说明/能力 + 启停；自定义代理可编辑/删除。 */
+@Composable
+private fun SubagentCard(
+    def: SubagentConfig,
+    onToggle: (Boolean) -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    YayaCard(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    def.name + if (def.builtin) " · 内置" else "",
+                    style = MonoSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                if (def.description.isNotBlank()) {
+                    Text(
+                        def.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                val caps = listOfNotNull(
+                    if (def.model.isNotBlank()) "模型 ${def.model}" else null,
+                    if (def.tools.isEmpty()) "全部工具" else "工具 ${def.tools.size} 个",
+                    if (def.maxSteps > 0) "≤${def.maxSteps} 步" else null,
+                )
+                Text(
+                    caps.joinToString(" · "),
+                    style = MonoLabel,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (!def.builtin) {
+                IconButton(onClick = onEdit) {
+                    Icon(Icons.Filled.Edit, contentDescription = "编辑子代理", modifier = Modifier.size(16.dp))
+                }
+                IconButton(onClick = onDelete) {
+                    Icon(Icons.Filled.Delete, contentDescription = "删除子代理", modifier = Modifier.size(16.dp))
+                }
+            }
+            Switch(checked = def.enabled, onCheckedChange = onToggle)
+        }
+    }
+}
+
+/** 子代理编辑弹窗：名称/说明/模型/专属指令/工具白名单/步数。 */
+@Composable
+private fun SubagentEditorDialog(
+    initial: SubagentConfig,
+    existing: List<SubagentConfig>,
+    onDismiss: () -> Unit,
+    onSave: (SubagentConfig) -> Unit,
+) {
+    var name by remember { mutableStateOf(initial.name) }
+    var description by remember { mutableStateOf(initial.description) }
+    var model by remember { mutableStateOf(initial.model) }
+    var prompt by remember { mutableStateOf(initial.prompt) }
+    var tools by remember { mutableStateOf(initial.tools.joinToString(",")) }
+    var maxSteps by remember { mutableStateOf(if (initial.maxSteps > 0) initial.maxSteps.toString() else "") }
+    var enabled by remember { mutableStateOf(initial.enabled) }
+
+    val trimmed = name.trim()
+    val conflict = existing.any { it.name == trimmed && it.name != initial.name }
+    val reserved = trimmed == SubagentStore.GENERAL || trimmed == SubagentStore.EXPLORE
+    val valid = trimmed.isNotEmpty() && !conflict && !reserved
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (initial.name.isBlank()) "添加子代理" else "编辑子代理") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 440.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("名称（模型用 subagent.agent 选择）") },
+                    singleLine = true,
+                    isError = conflict || reserved,
+                    supportingText = {
+                        when {
+                            reserved -> Text("general / explore 为保留名")
+                            conflict -> Text("名称已存在")
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = { description = it },
+                    label = { Text("一句话说明（供模型选择）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = model,
+                    onValueChange = { model = it },
+                    label = { Text("专属模型（可选，留空继承）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = prompt,
+                    onValueChange = { prompt = it },
+                    label = { Text("专属指令（追加在系统提示词后）") },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = tools,
+                    onValueChange = { tools = it },
+                    label = { Text("工具白名单（逗号分隔，留空继承全部）") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = maxSteps,
+                    onValueChange = { maxSteps = it.filter(Char::isDigit) },
+                    label = { Text("步数上限（可选）") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("启用", style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.size(8.dp))
+                    Switch(checked = enabled, onCheckedChange = { enabled = it })
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = valid,
+                onClick = {
+                    onSave(
+                        SubagentConfig(
+                            name = trimmed,
+                            description = description.trim(),
+                            prompt = prompt.trim(),
+                            model = model.trim(),
+                            tools = tools.split(',', '\n', '，')
+                                .map { it.trim() }
+                                .filter { it.isNotEmpty() },
+                            enabled = enabled,
+                            maxSteps = maxSteps.toIntOrNull()?.coerceAtLeast(1) ?: 0,
+                        )
+                    )
+                },
+            ) { Text("保存") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 @Composable

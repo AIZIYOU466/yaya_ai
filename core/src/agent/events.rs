@@ -76,6 +76,16 @@ pub enum Event {
         from: String,
         to: String,
     },
+    /// 子代理生命周期（任务 32）：同一轮可有多个并行子代理，`id` 标记归属
+    /// （由 tool_call id 派生，如 `sub-call_1`），`phase` ∈ `started` / `finished` / `failed`。
+    /// 子代理内部事件先缓冲、批次结束后随本事件一同回传，UI 可据此组成子会话。
+    Subagent {
+        id: String,
+        agent: String,
+        phase: String,
+        /// 单行摘要：`started` 时为任务、结束时为结果/错误（截断 160 字）。
+        detail: String,
+    },
     /// 任务已挂起（任务 27）：循环光标已存档，平台可稍后经 `loop_state` 继续；
     /// 与 `Error` 区分——挂起不是失败，排队中的消息等待继续后再发送。
     Suspended {

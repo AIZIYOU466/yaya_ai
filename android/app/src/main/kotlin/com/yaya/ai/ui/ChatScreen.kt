@@ -86,6 +86,7 @@ import com.yaya.ai.ChatImages
 import com.yaya.ai.ui.components.CapsTags
 import com.yaya.ai.ui.components.StatusDot
 import com.yaya.ai.ui.components.Tag
+import com.yaya.ai.ui.components.SubagentBadge
 import com.yaya.ai.ui.components.TaskCard
 import com.yaya.ai.ui.components.TaskCardState
 import com.yaya.ai.ui.components.YayaCard
@@ -220,6 +221,9 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
     var approval by remember { mutableStateOf<ApprovalReq?>(null) }
     var showSessions by remember { mutableStateOf(false) }
     var showCheckpoints by remember { mutableStateOf(false) }
+    // 任务 32：并行子代理状态（事件流推导）与子会话详情弹窗。
+    var subagentRuns by remember { mutableStateOf<Map<String, SubagentBadge>>(emptyMap()) }
+    var viewingSubagent by remember { mutableStateOf<SubagentBadge?>(null) }
     // 任务 26：待发送图片、相册选择、全屏查看。
     val attachments = remember { mutableStateListOf<PickedImage>() }
     var processingImages by remember { mutableStateOf(false) }
@@ -341,6 +345,28 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
                 }
             }
             "notice" -> appendSystem(ev.optString("message"))
+            "subagent" -> {
+                // 任务 32：子代理生命周期（started / finished / failed），id 标记归属。
+                val id = ev.optString("id")
+                val agent = ev.optString("agent").ifBlank { "general" }
+                val phase = ev.optString("phase")
+                val detail = ev.optString("detail")
+                if (id.isNotBlank()) {
+                    val prev = subagentRuns[id]
+                    val badge = SubagentBadge(
+                        id = id,
+                        agent = agent,
+                        phase = phase,
+                        task = if (phase == "started") detail else prev?.task.orEmpty(),
+                        detail = if (phase == "started") "" else detail,
+                    )
+                    subagentRuns = subagentRuns + (id to badge)
+                    taskState = taskState.copy(
+                        lastStep = if (phase == "started") "子代理 $agent 运行中" else "子代理 $agent $phase",
+                        subagents = subagentRuns.values.toList(),
+                    )
+                }
+            }
             "state" -> {
                 status = ev.optString("state")
                 taskState = taskState.copy(status = status)
@@ -469,6 +495,10 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
             put("maxSteps", 12)
             put("mode", read(ProviderStore.KEY_MODE, "build"))
             put("mcpServers", mcp)
+            // 任务 32：子代理定义（含内置 explore 的启停）+ 同轮并行上限。
+            val subagents = SubagentStore.load(context)
+            put("subagents", JSONArray().apply { subagents.forEach { put(it.toJson()) } })
+            put("maxParallelSubagents", SubagentStore.maxParallel(context))
             if (providersJson.length() > 0) put("providers", providersJson)
             // 任务 26：首条 user 消息图片（data URL 给 core，受管路径给本地消息持久化）。
             if (userImages.isNotEmpty()) put("userImages", arrOf(userImages))
@@ -529,6 +559,8 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
         running = true
         suspended = false
         status = "starting"
+        subagentRuns = emptyMap()
+        viewingSubagent = null
         taskState = TaskCardState(
             goal = displayText,
             status = "starting",
@@ -735,6 +767,7 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
             }
             TaskCard(
                 state = taskState,
+                onOpenSubagent = { viewingSubagent = it },
                 // 任务 27：停止 = 挂起（保存检查点，不丢弃任务）；挂起后按钮变“继续”。
                 onPause = {
                     if (running) {
@@ -1184,6 +1217,47 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
                     taskState = TaskCardState(mode = mode, model = activeModel?.model?.id ?: "")
                     snackbar.showSnackbar("已回滚到检查点")
                 }
+            },
+        )
+    }
+
+    // 任务 32：子代理子会话——展示该子代理的任务与结果（从事件流推进实时刷新）。
+    viewingSubagent?.let { open ->
+        val run = subagentRuns[open.id] ?: open
+        AlertDialog(
+            onDismissRequest = { viewingSubagent = null },
+            title = { Text("子代理 ${run.agent}") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "状态 " + when (run.phase) {
+                            "started" -> "运行中"
+                            "finished" -> "已完成"
+                            "failed" -> "失败"
+                            else -> run.phase
+                        } + " · id ${run.id}",
+                        style = MonoLabel,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (run.task.isNotBlank()) {
+                        Text("任务", style = MaterialTheme.typography.labelMedium)
+                        Text(run.task, style = MaterialTheme.typography.bodySmall)
+                    }
+                    if (run.detail.isNotBlank()) {
+                        Text(
+                            if (run.phase == "failed") "错误" else "结果摘要",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                        Text(
+                            run.detail,
+                            style = MonoSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { viewingSubagent = null }) { Text("关闭") }
             },
         )
     }
@@ -1693,6 +1767,7 @@ private fun SessionsSheet(
             },
         )
     }
+
 }
 
 // ── 检查点弹层（简化版：列出检查点数并一键回滚到最近一次）──

@@ -46,6 +46,10 @@ pub fn run(
             endpoints: vec![],
             preferred_endpoint: None,
             user_images: vec![],
+            // 金丝雀是单轮探针：不派生代理、不并行、不被白名单收窄（不携带任何工具调用）。
+            subagents: vec![],
+            max_parallel_subagents: 1,
+            tool_allowlist: None,
         };
         match run_loop(core, &p.prompt, &sub_cfg, on_event) {
             Ok(text) if text.contains(&p.expect) => {}
