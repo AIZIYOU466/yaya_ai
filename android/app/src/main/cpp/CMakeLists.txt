@@ -9,12 +9,13 @@ set(LLAMA_CPP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/llama_cpp")
 add_library(yaya_llama SHARED llama_jni.cpp)
 
 if(LLAMA_ENABLE)
-    if(NOT EXISTS "${LLAMA_CPP_DIR}/llama.h")
+    # llama.cpp b5000+ 头文件已从根目录移到 include/；兼容两种布局。
+    if(NOT EXISTS "${LLAMA_CPP_DIR}/llama.h" AND NOT EXISTS "${LLAMA_CPP_DIR}/include/llama.h")
         message(FATAL_ERROR
             "-PenableLlamaCpp=true 已启用，但缺少 llama.cpp 源码：请放到 ${LLAMA_CPP_DIR}/")
     endif()
     add_subdirectory(${LLAMA_CPP_DIR} llama_build)
-    target_include_directories(yaya_llama PRIVATE ${LLAMA_CPP_DIR})
+    target_include_directories(yaya_llama PRIVATE ${LLAMA_CPP_DIR}/include ${LLAMA_CPP_DIR})
     target_link_libraries(yaya_llama llama)
     message(STATUS "yaya_llama: FULL llama.cpp inference enabled")
 else()
