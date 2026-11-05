@@ -52,12 +52,12 @@ Java_com_yaya_ai_ModelBridge_nativeCancel(JNIEnv*, jobject) {
 #else
 
 // 全量构建（-PenableLlamaCpp=true，需 android/app/src/main/cpp/llama_cpp/ 源码）
-// API 版本目标：llama.cpp b4100 前后（llama_sampler + llama_new_context_with_model
-// 与 model 版 llama_tokenize/llama_token_to_piece 并存的窗口）。UNVERIFIED：本容器
-// 无 NDK 与 llama.cpp 源码，首次启用以实际编译为准，通过后在 AGENTS.md 登记版本。
+// API 版本目标：llama.cpp b6310（vocab 独立后的接口：llama_model_get_vocab /
+// 无参 llama_backend_init / llama_init_from_model）。CI 已编译验证。
 #include "llama.h"
 
 static llama_model* g_model = nullptr;
+static const llama_vocab* g_vocab = nullptr;
 static llama_context* g_ctx = nullptr;
 static llama_sampler* g_sampler = nullptr;
 static std::atomic<bool> g_cancelled{false};
@@ -75,17 +75,21 @@ Java_com_yaya_ai_ModelBridge_nativeLoadModel(
     const char* path = env->GetStringUTFChars(modelPath, nullptr);
 
     if (!g_backend_inited) {
-        llama_backend_init(false);
+        llama_backend_init();
         g_backend_inited = true;
     }
     if (g_model != nullptr) {
-        llama_free_model(g_model);
+        llama_model_free(g_model);
         g_model = nullptr;
+        g_vocab = nullptr;
     }
 
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = 0;
-    g_model = llama_load_model_from_file(path, model_params);
+    g_model = llama_model_load_from_file(path, model_params);
+    if (g_model != nullptr) {
+        g_vocab = llama_model_get_vocab(g_model);
+    }
 
     if (g_model == nullptr) {
         LOGE("Failed to load model: %s", path);
@@ -112,7 +116,7 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = 2048;
     ctx_params.n_threads = 4;
-    g_ctx = llama_new_context_with_model(g_model, ctx_params);
+    g_ctx = llama_init_from_model(g_model, ctx_params);
     if (g_ctx == nullptr) {
         LOGE("Failed to create context");
         env->ReleaseStringUTFChars(prompt, promptStr);
@@ -121,7 +125,7 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
     g_sampler = llama_sampler_init_greedy();
 
     const int promptLen = static_cast<int>(strlen(promptStr));
-    const int n_prompt = llama_tokenize(g_model, promptStr, promptLen, nullptr, 0, true, false);
+    const int n_prompt = llama_tokenize(g_vocab, promptStr, promptLen, nullptr, 0, true, false);
     if (n_prompt <= 0) {
         LOGE("tokenize failed (%d)", n_prompt);
         llama_sampler_free(g_sampler);
@@ -132,7 +136,7 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
         return JNI_FALSE;
     }
     std::vector<llama_token> tokens(n_prompt);
-    llama_tokenize(g_model, promptStr, promptLen, tokens.data(), n_prompt, true, false);
+    llama_tokenize(g_vocab, promptStr, promptLen, tokens.data(), n_prompt, true, false);
     env->ReleaseStringUTFChars(prompt, promptStr);
 
     const int kMaxNew = 512;
@@ -161,10 +165,10 @@ Java_com_yaya_ai_ModelBridge_nativeGenerate(
 
         llama_token newToken = llama_sampler_sample(g_sampler, g_ctx, idx);
         llama_sampler_accept(g_sampler, newToken);
-        if (llama_token_is_eog(g_model, newToken)) break;
+        if (llama_vocab_is_eog(g_vocab, newToken)) break;
 
         char buf[256];
-        int n = llama_token_to_piece(g_model, newToken, buf, sizeof(buf), 0, true);
+        int n = llama_token_to_piece(g_vocab, newToken, buf, sizeof(buf), 0, true);
         if (n > 0) {
             jstring jToken = env->NewStringUTF(std::string(buf, n).c_str());
             env->CallVoidMethod(callback, onToken, jToken);

@@ -4,6 +4,8 @@ plugins {
 }
 
 def llamaFull = project.findProperty("enableLlamaCpp")?.toString() == "true"
+// 全量构建可用 -PabiFilters=arm64-v8a 收窄（llama.cpp 编译耗时主要随 ABI 数线性涨）。
+def llamaAbi = project.findProperty("abiFilters")?.toString()?.trim()
 
 android {
     namespace "com.yaya.ai"
@@ -39,6 +41,10 @@ android {
         // 与 scripts/build-android.sh 产出的 ABI 对齐，避免出现部分 native 库缺失的切片。
         ndk {
             abiFilters += ['arm64-v8a', 'armeabi-v7a', 'x86_64']
+        }
+        if (llamaFull && llamaAbi) {
+            ndk.abiFilters.clear()
+            ndk.abiFilters.addAll(llamaAbi.split('[, ]+').findAll { it })
         }
         externalNativeBuild {
             cmake {

@@ -68,10 +68,10 @@ jobs:
             echo "ANDROID_KEYSTORE_B64 未配置，使用 debug 签名"
           fi
 
-      # 全量构建：-PenableLlamaCpp=true → externalNativeBuild/cmake 启用，
-      # AGP 用 NDK 的 CMake 工具链交叉编译 llama.cpp（runner 为 x86_64，无架构问题）。
-      - name: Build APK (release, llama.cpp full)
-        run: cd android && ./gradlew assembleRelease -PenableLlamaCpp=true --console=plain
+      # 全量构建：仅编主流 arm64-v8a（真机目标）；-PenableLlamaCpp=true →
+      # externalNativeBuild/cmake 启用，AGP 用 NDK 的 CMake 工具链交叉编译 llama.cpp。
+      - name: Build APK (release, llama.cpp full, arm64)
+        run: cd android && ./gradlew assembleRelease -PenableLlamaCpp=true -PabiFilters=arm64-v8a --console=plain
 
       - name: Upload release APK (llama full)
         uses: actions/upload-artifact@v4
