@@ -220,7 +220,7 @@ yaya_ai 已是「内核 + 聊天壳」。阶段 3 的目标是补齐 IDE 型客�
 
 ### Phase 3D：端侧与并行（P1）
 
-- [ ] **31. 端侧推理落地**（2026-10-31 部分落地：模型文件管理已完成，编译与真机推理未做）
+- [ ] **31. 端侧推理落地**（2026-11-05 重大进展：llama.cpp b6310 全量编译验证通过（CI arm64，R4 转 VERIFIED 编译级）；剩余：端侧推理真机运行 + function-calling 解析真机验证）
   - 现状：链路齐全（`llama_jni.cpp` + `ModelBridge.kt` + JNI `LocalBackend` + 路由 `local_ok`），但默认 STUB，llama.cpp 未编译，状态 UNVERIFIED
   - 进展（2026-10-31）：模型文件管理落地——`LocalModels.kt`（SAF 选文件 → 复制进 `filesDir/models/`：`.gguf` 校验 / 剩余空间预检 / 先写 `.part` 再改名 / 空文件与复制不完整校验 / 重名加后缀 / 删除限模型目录内并清选中 / `reconcileSelection` 清陈旧路径）+ `LocalModelFiles.kt`（纯 JVM 命名与体积规则）+ 设置页「端侧模型」卡片（导入、选择、体积、删除、导入进度、STUB 状态明示），选择写回既有 `KEY_MODEL_PATH`，`config.modelPath` → JNI `LocalBackend` 链路未改；JVM 单测 6 项、`assembleDebug`、`lintDebug` 通过；Kotlin/Compose 侧 UNVERIFIED（容器内无真机）。**未完成**：llama.cpp 全量编译（R4 仍 UNVERIFIED）、端侧 function-calling 真机验证。
   - 涉及：`android/app/src/main/cpp/llama_cpp/`（放入 llama.cpp 源码）；`scripts/build-android.sh`（`-PenableLlamaCpp=true`）；`ui/SettingsScreen.kt`（端侧模型导入/选择，已落地）；`AgentHost`（`localAvailable` + `modelPath` 下发，已接线）
@@ -431,6 +431,8 @@ yaya_ai 已是「内核 + 聊天壳」。阶段 3 的目标是补齐 IDE 型客�
 ---
 
 ## 更新记录
+
+- **2026-11-05**：任务 31 编译验证通过——新增 `.github/workflows/llama-full-build.yml`（workflow_dispatch 手动触发，arm64-v8a，CI 内拉 llama.cpp b6310 到 gitignore 的 cpp/llama_cpp/，`-PenableLlamaCpp=true -PabiFilters=arm64-v8a` 全量构建）。两轮修复：① CMakeLists 兼容 b5000+ 头文件 include/ 布局；② llama_jni.cpp 适配 b6310 vocab 独立 API（5 处编译错误 + 3 处 deprecated 替换）。run #3 编译成功，产物 `yayaai-apk-llama-full`（13.7MB）。R4 状态 UNVERIFIED → VERIFIED（编译级）；端侧推理运行/function-calling 真机验证仍待任务 36。顺带：`cargo test` + JNI check 通过（R17 发版前置）。
 
 - **2026-10-31**：任务 35 收尾（远程 SSH 后端）——实现此前已在工作区落地，本轮补**真实 sshd 集成验证** + 文档同步 + 勾选。工程实现：`SshClient.kt`（JSch 0.2.24 客户端：exec + SFTP + TOFU 主机密钥钉扎，纯 JVM）+ `SshHost.kt`（配置持久化 `flutter.ai_ssh`、连接复用、指纹管理、私钥 SAF 导入、测试）+ `RemotePaths.kt`（远端路径越界校验）+ `WorkspaceFileAccess.kt`（SSH 启用时文件工具走 SFTP）+ `AgentHost.kt`（`terminal_exec` 走远端，退出码语义不变）+ `SettingsScreen.kt`（开关/配置弹窗/测试连接/重置指纹）+ `build.gradle`（jsch 0.2.24，锁版因 0.2.25+ multi-release jar 与 Android 构建链不兼容）。验证：容器内搭真实 openssh sshd（127.0.0.1:2222，sshtest 用户 pubkey）跑通 `SshClientIntegrationTest`（exec 输出/退出码、SFTP 往返、主机密钥变更拒绝 3 项）+ `RemotePathsTest` 5 项；`testDebugUnitTest` 全部 25 项与 `assembleDebug` 通过。范围：SSH 只替换平台执行通道，不碰 core 路由（ROADMAP 旧描述中 core/router 改 SSH 语义未做，保持更干净）；终端页/Git 页仍本地 proot。更新 `docs/README.md` 补「远程 SSH 后端」章节。
 

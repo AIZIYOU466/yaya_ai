@@ -80,8 +80,7 @@
 - Android 全量需把 llama.cpp 源码放到 `android/app/src/main/cpp/llama_cpp/`（已被 `.gitignore` 忽略）；缺源码时 CMake **报错终止**，不静默降级。
 - STUB 必须在运行时显式输出 `[STUB] 当前为桩实现，推理结果不可用`，禁止伪装成成功推理。
 - **版本登记**（JNI 所针对的 llama.cpp API 版本）：
-  - 目标窗口：b4100 前后（`llama_sampler_*` 与 `llama_new_context_with_model` 并存、model 版 `llama_tokenize` / `llama_token_to_piece`）
-  - 状态：**UNVERIFIED** —— 当前容器无 llama.cpp 源码，全量路径尚未编译验证；首次通过编译后在此登记确认的 tag。
+  - 已验证：**b6310**（vocab 独立接口：无参 `llama_backend_init` / `llama_model_load_from_file` / `llama_init_from_model` / `llama_model_get_vocab`），2026-11-05 CI 全量编译通过（`.github/workflows/llama-full-build.yml`，arm64-v8a，产物 `yayaai-apk-llama-full`）；状态：**VERIFIED（编译级）**——端侧推理真机运行与 function-calling 解析仍待真机验证（任务 31/36）
 
 ## R5 通信协议分层
 
