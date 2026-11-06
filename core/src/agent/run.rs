@@ -11,7 +11,8 @@ use crate::agent::capability::Capabilities;
 use crate::agent::degrade::{BehaviorDim, BehaviorHistory, DegradeMode};
 use crate::agent::events::{Event, NoticeTag};
 use crate::agent::model::{
-    BackendError, Content, ContentPart, GenerateRequest, Message, ModelBackend, ModelOutput, ToolCall,
+    BackendError, Content, ContentPart, GenerateRequest, ImageUrl, Message, ModelBackend,
+    ModelOutput, ToolCall,
 };
 use crate::agent::permission::{self, ApprovalRequest, RunMode, Verdict};
 use crate::agent::router::{route, Backend};
@@ -48,7 +49,11 @@ pub struct RunConfig {
     pub base_url: Option<String>,
     /// 循环光标检查点（43，从平台注入）：上次中断时的 `LoopState` JSON；
     /// 提供时从断点续跑（已执行工具不重复），非法/缺失则从头开始。
+    /// 优先使用 [`Self::loop_state_raw`]（平台直传原始 JSON，避免 DOM 二次放大）；
+    /// 本字段为兼容旧版 `loopState` 请求而保留。
     pub loop_state: Option<Value>,
+    /// 检查点原始 JSON（平台直传，不历经 Kotlin JSONObject/toString 往返）。
+    pub loop_state_raw: Option<String>,
     /// 端点池（42）：非空时启用质量感知路由（select 打分 + 故障切换），
     /// 为空走原单后端 route()。
     pub endpoints: Vec<crate::agent::pool::EndpointProfile>,
@@ -84,6 +89,7 @@ impl Default for RunConfig {
             degrade_state: None,
             base_url: None,
             loop_state: None,
+            loop_state_raw: None,
             endpoints: vec![],
             preferred_endpoint: None,
             user_images: vec![],
@@ -134,30 +140,111 @@ impl LoopState {
     pub fn from_value(v: &Value) -> Option<Self> {
         serde_json::from_value(v.clone()).ok()
     }
+
+    /// 从平台直传的原始 JSON 解析（不复制 DOM，避免大检查点内存放大）。
+    pub fn from_str(raw: &str) -> Option<Self> {
+        serde_json::from_str(raw).ok()
+    }
+
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "null".to_string())
+    }
 }
 
-/// 构造 `Event::LoopState` 存档事件。
-fn loop_state_event(
+/// 检查点硬上限（恢复用 JSON 字节数）：超过则跳过存档并显式告警（任务 43，不静默）。
+pub const MAX_LOOP_STATE_BYTES: usize = 2 * 1024 * 1024;
+/// 检查点中单条文本上限：工具输出/文件内容常达百 KB，但恢复不需要全文。
+pub const MAX_CHECKPOINT_TEXT_BYTES: usize = 32 * 1024;
+const CHECKPOINT_TRUNCATED: &str = "\n…[检查点裁剪：原文过长，恢复后需重新读取]";
+const CHECKPOINT_IMAGE_OMITTED: &str = "checkpoint:image-omitted";
+
+fn truncate_utf8(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut cut = max;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = String::with_capacity(cut + CHECKPOINT_TRUNCATED.len());
+    out.push_str(&s[..cut]);
+    out.push_str(CHECKPOINT_TRUNCATED);
+    out
+}
+
+/// 存档前裁剪：图片 data URL 与超长文本不进入检查点。
+/// 图片改用占位符（恢复后模型不重复见 base64，也不会撑爆内存）；
+/// 超长文本截断（工具结果在恢复轮已由 pending_calls 继续执行，无需原文）。
+fn checkpoint_messages(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|m| {
+            let content = m.content.as_ref().map(|c| match c {
+                Content::Text(t) => Content::Text(truncate_utf8(t, MAX_CHECKPOINT_TEXT_BYTES)),
+                Content::Parts(parts) => Content::Parts(
+                    parts
+                        .iter()
+                        .map(|p| match p {
+                            ContentPart::Text { text } => {
+                                ContentPart::Text { text: truncate_utf8(text, MAX_CHECKPOINT_TEXT_BYTES) }
+                            }
+                            ContentPart::ImageUrl { image_url } => ContentPart::ImageUrl {
+                                image_url: ImageUrl {
+                                    url: if image_url.url.starts_with("data:") {
+                                        CHECKPOINT_IMAGE_OMITTED.to_string()
+                                    } else {
+                                        image_url.url.clone()
+                                    },
+                                    detail: image_url.detail.clone(),
+                                },
+                            },
+                        })
+                        .collect(),
+                ),
+            });
+            Message {
+                role: m.role.clone(),
+                content,
+                tool_calls: m.tool_calls.clone(),
+                tool_call_id: m.tool_call_id.clone(),
+                name: m.name.clone(),
+            }
+        })
+        .collect()
+}
+
+/// 存档循环光标：裁剪 + 硬上限。超限跳过并显式 Notice（任务继续，但中断后不可恢复）。
+fn save_checkpoint(
+    on_event: &mut dyn FnMut(Event) -> Result<(), String>,
     messages: &[Message],
     stage: LoopStage,
     step: usize,
     calls: &[ToolCall],
     cursor: usize,
     degrade: Value,
-) -> Event {
-    Event::LoopState {
-        state: LoopState {
-            version: LOOP_STATE_VERSION,
-            stage,
-            step,
-            messages: messages.to_vec(),
-            pending_calls: calls.to_vec(),
-            pending_cursor: cursor,
-            degrade: Some(degrade),
-        }
-        .to_value()
-        .to_string(),
+) -> Result<(), String> {
+    let state = LoopState {
+        version: LOOP_STATE_VERSION,
+        stage,
+        step,
+        messages: checkpoint_messages(messages),
+        pending_calls: calls.to_vec(),
+        pending_cursor: cursor,
+        degrade: Some(degrade),
+    };
+    let json = state.to_json_string();
+    if json.len() > MAX_LOOP_STATE_BYTES {
+        on_event(Event::Notice {
+            message: format!(
+                "检查点过大（{} KB，上限 {} KB），已跳过存档：任务可继续，但中断后无法从断点恢复",
+                json.len() / 1024,
+                MAX_LOOP_STATE_BYTES / 1024
+            ),
+            tag: Some("checkpoint:skipped".to_string()),
+        })?;
+        return Ok(());
     }
+    on_event(Event::LoopState { state: json })
 }
 
 pub fn default_system_prompt() -> String {
@@ -640,23 +727,29 @@ pub fn run_loop(
         )
     };
     let mut messages = vec![Message::system(system), first_user];
-    // 43 断点恢复（R13）：loop_state 提供时从断点续跑（已执行工具不重复）。
-    // 降级快照若未由平台单独注入，则从 loop_state 里带出。
-    let mut resume: Option<LoopState> = None;
-    if let Some(v) = &cfg.loop_state {
-        if let Some(s) = LoopState::from_value(v) {
-            if cfg.degrade_state.is_none() {
-                if let Some(d) = &s.degrade {
-                    core.degrade = crate::agent::degrade::DegradeState::from_snapshot(d);
-                }
+    // 43 断点恢复（R13）：优先用平台直传的原始 JSON（loop_state_raw），避免 DOM 二次放大；
+    // 旧版 `loopState` Value 入口保留兼容。messages 直接 move 走，不再整份 clone。
+    let mut resume: Option<(Vec<ToolCall>, usize)> = None;
+    let restored = match &cfg.loop_state_raw {
+        Some(raw) => LoopState::from_str(raw),
+        None => cfg.loop_state.as_ref().and_then(LoopState::from_value),
+    };
+    if let Some(mut st) = restored {
+        if cfg.degrade_state.is_none() {
+            if let Some(d) = &st.degrade {
+                core.degrade = crate::agent::degrade::DegradeState::from_snapshot(d);
             }
-            messages = s.messages.clone();
-            resume = Some(s);
-            on_event(Event::Notice {
-                message: "已从检查点恢复，从断点继续".to_string(),
-                tag: None,
-            })?;
         }
+        messages = std::mem::take(&mut st.messages);
+        resume = Some((st.pending_calls, st.pending_cursor));
+        on_event(Event::Notice {
+            message: "已从检查点恢复，从断点继续".to_string(),
+            tag: None,
+        })?;
+    }
+    // 空任务护栏：既无新指令也无可用检查点时，不发空 user 请求（明确失败，不静默）。
+    if task.trim().is_empty() && resume.is_none() {
+        return fail(on_event, "任务内容为空：没有新指令，也没有可恢复的检查点".to_string());
     }
     let mut tool_specs = tools::specs();
     // 32：subagent 规格按当前子代理定义动态生成（列出可用子代理）。
@@ -724,14 +817,7 @@ pub fn run_loop(
             } else {
                 "应用进入后台"
             };
-            on_event(loop_state_event(
-                &messages,
-                LoopStage::Generate,
-                step,
-                &[],
-                0,
-                core.degrade.snapshot(),
-            ))?;
+            save_checkpoint(&mut *on_event, &messages, LoopStage::Generate, step, &[], 0, core.degrade.snapshot())?;
             on_event(Event::Suspended {
                 reason: format!("{reason}；已保存检查点，可继续执行"),
             })?;
@@ -790,9 +876,8 @@ pub fn run_loop(
         let resumed = resume.is_some();
         let mut signal = ActivitySignal::Normal;
         // 任务 30：本轮生成耗时（含降级重试的实际生成），随 Usage 事件上报。
-        let output = if let Some(s) = resume.take() {
-            let calls: Vec<ToolCall> =
-                s.pending_calls.into_iter().skip(s.pending_cursor).collect();
+        let output = if let Some((pending, cursor)) = resume.take() {
+            let calls: Vec<ToolCall> = pending.into_iter().skip(cursor).collect();
             if calls.is_empty() {
                 // 游标已在末尾：本步工具全部完成，进入下一步生成。
                 continue;
@@ -887,8 +972,12 @@ pub fn run_loop(
                     tool_choice: None,
                 };
                 let retry_result: Result<ModelOutput, BackendError> = {
-                    let backend_impl = pick_backend(core, backend, &selected_endpoint)
-                        .expect("降级重试：端点实例丢失");
+                    let Some(backend_impl) = pick_backend(core, backend, &selected_endpoint) else {
+                        return fail(
+                            on_event,
+                            format!("生成失败（{backend:?}）：降级重试时端点实例丢失"),
+                        );
+                    };
                     let mut on_token2 = |t: &str| {
                         on_event(Event::Token {
                             text: t.to_string(),
@@ -1199,14 +1288,15 @@ pub fn run_loop(
             );
             messages.push(Message::tool_result(&call.id, &call.function.name, feed));
             // 43：每个工具调用完成后存循环光标（恢复时 skip(cursor)，已完成工具不重复执行）。
-            on_event(loop_state_event(
+            save_checkpoint(
+                &mut *on_event,
                 &messages,
                 LoopStage::Tools,
                 step,
                 &output.tool_calls,
                 i + 1,
                 core.degrade.snapshot(),
-            ))?;
+            )?;
         }
 
         // 4C-3 补偿驱动（降档）：成功 = 本轮有工具调用且未发生 schema 失败；
@@ -1845,6 +1935,127 @@ mod tests {
             Event::Notice { message, .. } if message.contains("已从检查点恢复")
         )));
         assert!(events.iter().any(|e| matches!(e, Event::Done { .. })));
+    }
+
+    /// 检查点存档前必须裁掉图片 base64 与超长文本（否则恢复时内存放大导致静默杀进程）。
+    #[test]
+    fn checkpoint_trims_image_data_url_and_long_text() {
+        let long = "字".repeat(MAX_CHECKPOINT_TEXT_BYTES);
+        let msgs = vec![
+            Message::user("任务"),
+            Message::user_with_images(
+                "看图",
+                vec![Content::image("data:image/jpeg;base64,AAAABBBBCCCC")],
+            ),
+            Message::tool_result("call_1", "file_read", long.clone()),
+        ];
+        let trimmed = checkpoint_messages(&msgs);
+        let json = serde_json::to_string(&trimmed).unwrap();
+        assert!(
+            !json.contains("AAAABBBBCCCC"),
+            "图片 data URL 不应进入检查点（改占位符）"
+        );
+        assert!(json.contains(CHECKPOINT_IMAGE_OMITTED));
+        assert!(json.contains("检查点裁剪"), "超长文本应显式标记已裁剪");
+        assert!(
+            json.len() < MAX_LOOP_STATE_BYTES,
+            "裁剪后应低于硬上限，实际 {} 字节",
+            json.len()
+        );
+    }
+
+    /// 超过硬上限时：不落检查点，但必须显式 Notice 告知（不静默）。
+    #[test]
+    fn checkpoint_over_limit_reports_notice_instead_of_silent_skip() {
+        let big = "x".repeat(MAX_CHECKPOINT_TEXT_BYTES);
+        let messages: Vec<Message> = (0..80)
+            .map(|i| Message::tool_result(&format!("c{i}"), "terminal_exec", big.clone()))
+            .collect();
+        let mut events = Vec::new();
+        save_checkpoint(
+            &mut |e| {
+                events.push(e);
+                Ok(())
+            },
+            &messages,
+            LoopStage::Tools,
+            0,
+            &[],
+            0,
+            serde_json::json!([]),
+        )
+        .unwrap();
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::LoopState { .. })),
+            "超过硬上限不应落盘（否则恢复时 OOM 静默闪退）"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                Event::Notice { tag: Some(t), .. } if t == "checkpoint:skipped"
+            )),
+            "跳过存档必须显式告知用户"
+        );
+    }
+
+    /// 原始 JSON 检查点入口（平台直传）与 Value 入口语义一致。
+    #[test]
+    fn resume_accepts_raw_checkpoint_json() {
+        let c1 = notify_call_named("raw_t1");
+        let st = LoopState {
+            version: LOOP_STATE_VERSION,
+            stage: LoopStage::Tools,
+            step: 0,
+            messages: vec![
+                Message::system("sys"),
+                Message::user("任务"),
+                Message::assistant_tool_calls(None, vec![c1.clone()]),
+            ],
+            pending_calls: vec![c1],
+            pending_cursor: 0,
+            degrade: None,
+        };
+        let cfg = RunConfig {
+            loop_state_raw: Some(st.to_json_string()),
+            ..Default::default()
+        };
+        let titles = Arc::new(Mutex::new(Vec::new()));
+        let mut core = AgentCore::new(Box::new(RecordingExecutor {
+            titles: titles.clone(),
+        }));
+        core.register_backend(Box::new(ReqRecorder {
+            steps: VecDeque::from(vec![ModelOutput {
+                text: "收尾".into(),
+                tool_calls: vec![],
+                usage: None,
+                warnings: vec![],
+            }]),
+            choices: Arc::new(Mutex::new(Vec::new())),
+        }));
+        core.hints = RouteHints {
+            force: Some(Backend::Cloud),
+            ..Default::default()
+        };
+        run_loop(&mut core, "", &cfg, &mut |_| Ok(())).unwrap();
+        assert_eq!(titles.lock().unwrap().clone(), vec!["raw_t1".to_string()]);
+    }
+
+    /// 空指令 + 无检查点：必须显式失败，不得发一个空 user 消息去耗 token。
+    #[test]
+    fn empty_task_without_checkpoint_fails_explicitly() {
+        let (mut core, _) = rec_core(vec![ModelOutput {
+            text: "不该走到这里".into(),
+            tool_calls: vec![],
+            usage: None,
+            warnings: vec![],
+        }]);
+        core.hints = RouteHints {
+            force: Some(Backend::Cloud),
+            ..Default::default()
+        };
+        let err = run_loop(&mut core, "   ", &RunConfig::default(), &mut |_| Ok(()))
+            .expect_err("空任务应显式失败");
+        assert!(err.contains("任务内容为空"), "实际错误: {err}");
     }
 
     // ---- 42：端点池与质量感知路由（run_loop 集成）----

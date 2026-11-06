@@ -39,14 +39,17 @@ interface AgentApi {
     /** 挂起当前任务（保存检查点，不丢弃）；配合 [resumeAgent] 续跑（任务 27）。 */
     fun suspendAgent()
 
-    /** 从检查点继续挂起的任务；无断点返回 false。 */
-    fun resumeAgent(taskId: String, configJson: String): Boolean
+    /** 从检查点继续挂起的任务。返回 "" = 已启动；"busy" = 仍有任务线程在跑；"none" = 无可恢复断点。 */
+    fun resumeAgent(taskId: String, configJson: String): String
 
-    /** 是否存在可恢复的任务断点（冷启动恢复暂停状态）。 */
-    fun hasPendingTask(): Boolean
+    /** 是否存在可恢复的任务断点（按会话）。 */
+    fun hasPendingTask(sessionId: String): Boolean
 
-    /** 丢弃挂起任务的断点（用户明确放弃）。 */
-    fun clearPendingTask()
+    /** 丢弃断点（按会话；用户明确放弃）。 */
+    fun clearPendingTask(sessionId: String)
+
+    /** 上次进程异常终止（Rust panic / native abort）的原因；读到即清除，无则 null。 */
+    fun consumeCrashReport(): String?
 
     fun stopAgent()
 
@@ -207,17 +210,20 @@ class MainActivity : ComponentActivity(), AgentApi {
         agentHost.suspend()
     }
 
-    override fun resumeAgent(taskId: String, configJson: String): Boolean {
-        if (agentTaskThread?.isAlive == true) return false
+    override fun resumeAgent(taskId: String, configJson: String): String {
+        if (agentTaskThread?.isAlive == true) return "busy"
+        if (!agentHost.hasPendingTask(taskId)) return "none"
         startAgentThread { agentHost.resume(taskId, configJson) }
-        return true
+        return ""
     }
 
-    override fun hasPendingTask(): Boolean = agentHost.hasPendingTask()
+    override fun hasPendingTask(sessionId: String): Boolean = agentHost.hasPendingTask(sessionId)
 
-    override fun clearPendingTask() {
-        agentHost.clearPendingTask()
+    override fun clearPendingTask(sessionId: String) {
+        agentHost.clearPendingTask(sessionId)
     }
+
+    override fun consumeCrashReport(): String? = agentHost.consumeCrashReport()
 
     /** 后台执行一次 native 循环；前台服务只是活跃窗口加速器（任务 44）。 */
     private fun startAgentThread(block: () -> String) {
@@ -225,7 +231,13 @@ class MainActivity : ComponentActivity(), AgentApi {
         // 任务状态在 loop_state 检查点；服务超时/被杀后经检查点续跑）。
         AgentForegroundService.start(this)
         agentTaskThread = Thread {
-            val resultText = block()
+            // 任务线程上抛的 Throwable（含 native 初始化 Error）必须转成可见事件，
+            // 否则线程静默死亡——正是“点继续无提示闪退”的元凶之一。
+            val resultText = try {
+                block()
+            } catch (t: Throwable) {
+                "ERROR: 任务线程异常终止：${t.javaClass.simpleName}: ${t.message ?: ""}"
+            }
             // libLoaded=false 等非事件化失败路径：经事件通道送回错误。
             if (resultText.startsWith("ERROR:")) {
                 eventsFlow.tryEmit(
@@ -237,8 +249,7 @@ class MainActivity : ComponentActivity(), AgentApi {
             }
             // 任务线程结束：释放前台服务（下次任务再启动；onTimeout 耗尽路径由系统负责重启）。
             AgentForegroundService.stop(this)
-        }.apply {
-            name = "yaya-agent"
+        }.apply {            name = "yaya-agent"
             start()
         }
     }

@@ -237,6 +237,7 @@ pub fn resolve(
         base_url: parent_cfg.base_url.clone(),
         // 子代理无独立检查点：不从父任务恢复；端点池沿用父配置（同一平台能力）。
         loop_state: None,
+        loop_state_raw: None,
         endpoints: parent_cfg.endpoints.clone(),
         preferred_endpoint: parent_cfg.preferred_endpoint.clone(),
         // 子任务文本独立：不继承父任务的图片附件。

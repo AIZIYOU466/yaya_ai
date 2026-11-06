@@ -31,6 +31,55 @@ use yaya_core::agent::{run_loop, AgentCore, Event, RunConfig};
 /// 单任务取消标志（里程碑一为单任务模型）。
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
+/// 最近一次 panic 的描述（hook 写入；abort 前也会执行）。
+static LAST_PANIC: OnceLock<std::sync::Mutex<String>> = OnceLock::new();
+/// 崩溃日记文件路径（平台经 config.loopJournal 传入；Rust 不持久化自身状态，但
+/// abort 是无机会回传事件的——这是唯一能让“静默闪退”在下一次启动时开口的通道）。
+static PANIC_JOURNAL: OnceLock<String> = OnceLock::new();
+static PANIC_HOOK: std::sync::Once = std::sync::Once::new();
+
+fn last_panic() -> String {
+    LAST_PANIC
+        .get()
+        .and_then(|m| m.lock().ok())
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+/// 安装 panic hook：logcat + 崩溃日记（下有 abort 时 hook 仍会先执行）。
+fn install_panic_hook(journal: Option<&str>) {
+    if let Some(path) = journal {
+        if !path.is_empty() {
+            let _ = PANIC_JOURNAL.set(path.to_string());
+        }
+    }
+    PANIC_HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let msg = format!("{info}");
+            eprintln!("[yaya-core] PANIC: {msg}");
+            if let Some(slot) = LAST_PANIC.get() {
+                if let Ok(mut g) = slot.lock() {
+                    *g = msg.clone();
+                }
+            }
+            if let Some(path) = PANIC_JOURNAL.get() {
+                use std::io::Write;
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    let _ = writeln!(f, "{ts} {msg}");
+                }
+            }
+        }));
+    });
+}
+
 /// 全局环境信号槽（JNI 层写入，core 决策；与 `AgentCore.signals` 同一实例）。
 static SIGNALS: OnceLock<Arc<yaya_core::agent::SignalSlots>> = OnceLock::new();
 
@@ -707,6 +756,9 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
         let jhost = JniHost(Arc::new(HostInner { vm, host: host_ref }));
 
         let config: Value = serde_json::from_str(&config_str).unwrap_or(Value::Null);
+        // panic = abort 下 catch_unwind 捕不到，但 hook 在 abort 前会执行：
+        // 把原因写进崩溃日记，下一次启动由平台显式展示（不再静默）。
+        install_panic_hook(config.get("loopJournal").and_then(|v| v.as_str()));
         let base_url = config.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("");
         let api_key = config.get("apiKey").and_then(|v| v.as_str()).unwrap_or("");
         let model = config.get("model").and_then(|v| v.as_str());
@@ -843,7 +895,16 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
             canary: config.get("canary").and_then(|v| v.as_bool()).unwrap_or(false),
             degrade_state: config.get("degradeState").cloned(),
             // 43：上次中断的循环光标检查点（平台落盘后注入，从断点续跑）。
-            loop_state: config.get("loopState").cloned(),
+            // 平台直传原始 JSON（loopStateRaw）时不复制 DOM；旧版 loopState 保留兼容。
+            loop_state_raw: config
+                .get("loopStateRaw")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            loop_state: if config.get("loopStateRaw").is_some() {
+                None
+            } else {
+                config.get("loopState").cloned()
+            },
             // 42/25：端点池——多提供商（providers）优先派生（全 Cloud kind），
             // 缺省用 `endpoints` 字段（[{baseUrl, kind}]，单点/混合配置）。空走原单后端路由。
             endpoints: {
@@ -930,7 +991,14 @@ pub extern "system" fn Java_com_yaya_ai_AgentHost_nativeRunLoop(
         });
         res
     }))
-    .unwrap_or_else(|_| Err("Rust Core panic (uncaught)".to_string()));
+    .unwrap_or_else(|_| {
+        let p = last_panic();
+        Err(if p.is_empty() {
+            "Rust Core 内部错误（panic，无详情）".to_string()
+        } else {
+            format!("Rust Core 内部错误（panic）：{p}")
+        })
+    });
 
     let text = match result {
         Ok(text) => text,

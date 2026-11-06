@@ -92,19 +92,7 @@ class SshClient(
         try {
             ch.setErrStream(err, true)
             ch.connect(config.connectTimeoutMs)
-            val reader = Thread {
-                truncated = copyCapped(ch.inputStream, out)
-            }.apply {
-                isDaemon = true
-                name = "ssh-exec-reader"
-                start()
-            }
-            reader.join(timeoutMs)
-            if (reader.isAlive) {
-                ch.disconnect()
-                reader.join(1_000)
-                throw SshException("命令超时（${timeoutMs}ms）")
-            }
+            truncated = drainExecOutput(ch, out, timeoutMs)
             // exit-status 可能与 EOF 到达有微小时间差，最多等 3 秒。
             val deadline = System.currentTimeMillis() + 3_000
             while (ch.exitStatus < 0 && !ch.isClosed && System.currentTimeMillis() < deadline) {
@@ -324,24 +312,45 @@ class SshClient(
         }
     }
 
-    private fun copyCapped(input: InputStream, out: ByteArrayOutputStream): Boolean {
+    /**
+     * 非阻塞收集 stdout（在调用线程的 synchronized 临界区内执行）。
+     *
+     * 不能用阻塞 `read()` 等 EOF：OpenSSH 对 exec 会话可能只发 CHANNEL_CLOSE、
+     * 不发 CHANNEL_EOF，此时 JSch 的流永远不返回 -1，命中偶发“命令超时”（曾使集成
+     * 测试偶发失败）。改为 available() 轮询 + `exitStatus`/`isClosed` 双判据：
+     * 退出码到达即说明服务端已执行完且此前数据均已缓冲，再排干一次缓冲即结束。
+     */
+    private fun drainExecOutput(ch: ChannelExec, out: ByteArrayOutputStream, timeoutMs: Long): Boolean {
+        val input = ch.inputStream
         val buffer = ByteArray(DEFAULT_BUFFER)
+        val deadline = System.currentTimeMillis() + timeoutMs
         var truncated = false
         while (true) {
-            val n = try {
-                input.read(buffer)
-            } catch (_: Exception) {
-                break
+            while (input.available() > 0) {
+                val n = try {
+                    input.read(buffer)
+                } catch (_: Exception) {
+                    -1
+                }
+                if (n <= 0) break
+                val remaining = MAX_OUTPUT_BYTES - out.size()
+                if (remaining <= 0) {
+                    truncated = true
+                } else {
+                    out.write(buffer, 0, minOf(n, remaining))
+                    if (n > remaining) truncated = true
+                }
             }
-            if (n <= 0) break
-            val remaining = MAX_OUTPUT_BYTES - out.size()
-            if (remaining <= 0) {
-                truncated = true
-                // 继续读空流，避免服务端因未读完而阻塞退出。
-                continue
+            if ((ch.isClosed || ch.exitStatus >= 0) && input.available() <= 0) break
+            if (System.currentTimeMillis() >= deadline) {
+                throw SshException("命令超时（${timeoutMs}ms）")
             }
-            out.write(buffer, 0, minOf(n, remaining))
-            if (n > remaining) truncated = true
+            try {
+                Thread.sleep(5)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw SshException("命令执行被中断", e)
+            }
         }
         return truncated
     }

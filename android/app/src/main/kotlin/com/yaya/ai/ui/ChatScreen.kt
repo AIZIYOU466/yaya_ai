@@ -201,6 +201,8 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
     var running by remember { mutableStateOf(false) }
     // 任务 27：挂起态与消息队列。挂起不是失败，队列在继续/新一轮结束后自动发送。
     var suspended by remember { mutableStateOf(false) }
+    // 本会话是否已落过检查点（内存标记；error 时据此回到可继续态，避免误报不可恢复）。
+    var checkpointSaved by remember { mutableStateOf(false) }
     val queue = remember { mutableStateListOf<QueuedMessage>() }
     var showDiscardConfirm by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf("") }
@@ -401,6 +403,7 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
                 flushTokens()
                 running = false
                 suspended = false
+                checkpointSaved = false
                 status = "done"
                 taskState = taskState.copy(status = "done")
             }
@@ -413,12 +416,26 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
                 taskState = taskState.copy(status = "suspended")
                 appendSystem(ev.optString("reason").ifBlank { "任务已暂停，可点击继续" })
             }
+            "loop_state" -> {
+                // 检查点已存档（内存标记，避免每步读磁盘；done 时归零）。
+                checkpointSaved = true
+            }
             "error" -> {
                 flushTokens()
                 running = false
-                suspended = false
-                appendSystem("错误: ${ev.optString("message")}")
-                taskState = taskState.copy(status = "error")
+                // 检查点由 AgentHost 保留（仅 done 清除）：存在则回到“可继续”态，
+                // 不把已跑到一半的任务静默丢弃。
+                val msg = ev.optString("message")
+                suspended = checkpointSaved
+                status = if (checkpointSaved) "suspended" else "error"
+                appendSystem(
+                    if (checkpointSaved) {
+                        "错误: $msg（检查点已保留：可点击继续重试，或新建会话放弃）"
+                    } else {
+                        "错误: $msg"
+                    }
+                )
+                taskState = taskState.copy(status = if (checkpointSaved) "suspended" else "error")
             }
             "approval_request" -> {
                 flushTokens()
@@ -558,6 +575,7 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
     fun dispatch(agentPrompt: String, picks: List<PickedImage>, displayText: String) {
         running = true
         suspended = false
+        checkpointSaved = false
         status = "starting"
         subagentRuns = emptyMap()
         viewingSubagent = null
@@ -653,19 +671,26 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
         }
         running = true
         suspended = false
+        checkpointSaved = false
         status = "starting"
         historyCount = items.size // 暂停前的残缺输出不并入恢复后的回复
         taskState = taskState.copy(status = "starting", startedAt = System.currentTimeMillis())
         scope.launch {
             val started = withContext(Dispatchers.IO) {
-                api?.resumeAgent(sessionId, readConfig().toString()) == true
+                api?.resumeAgent(sessionId, readConfig().toString()) ?: "none"
             }
-            if (!started) {
+            if (started.isNotEmpty()) {
                 running = false
                 suspended = true
                 status = "suspended"
                 taskState = taskState.copy(status = "suspended")
-                appendSystem("继续失败：没有可恢复的任务断点")
+                appendSystem(
+                    when (started) {
+                        "busy" -> "继续失败：仍有任务在执行，请等当前步骤结束后重试"
+                        "none" -> "继续失败：本会话没有可恢复的任务断点"
+                        else -> "继续失败：$started"
+                    }
+                )
             }
         }
     }
@@ -680,6 +705,7 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
         totalTokens = 0
         sessionUsage = UsageInfo()
         suspended = false
+        checkpointSaved = false
         status = ""
         taskState = TaskCardState(mode = mode, model = activeModel?.model?.id ?: "")
     }
@@ -696,9 +722,12 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
             sessionId = data.optString("sessionId")
             val messages = data.optJSONArray("messages") ?: return@launch
             restoreItems(messages)
+            // 上次进程异常终止（Rust panic / native abort）的原因：显式呈现，不静默。
+            api?.consumeCrashReport()?.let { appendSystem("上次任务异常终止：$it") }
             // 进程被杀后仍有循环光标：恢复“已暂停”状态并提供继续入口。
-            if (api?.hasPendingTask() == true) {
+            if (api?.hasPendingTask(sessionId) == true) {
                 suspended = true
+                checkpointSaved = true
                 status = "suspended"
                 taskState = TaskCardState(
                     goal = items.lastOrNull { it.role == "user" }?.text ?: "",
@@ -751,8 +780,8 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
                 Icon(Icons.Filled.Menu, contentDescription = "菜单")
             }
             IconButton(onClick = {
-                if (running || suspended) {
-                    scope.launch { snackbar.showSnackbar("请先继续或结束当前任务") }
+                if (running) {
+                    scope.launch { snackbar.showSnackbar("任务执行中：先点暂停，暂停的任务会保留在当前会话，可随时回来继续") }
                     return@IconButton
                 }
                 showSessions = true
@@ -1127,11 +1156,24 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
                     attachments.clear()
                     viewingImage = null
                     queue.clear()
-                    suspended = false
+                    // 会话切换：暂停态属于各自会话，不能继承上一个会话的状态。
+                    val pending = withContext(Dispatchers.IO) {
+                        api?.hasPendingTask(sessionId) == true
+                    }
+                    suspended = pending
+                    checkpointSaved = pending
+                    status = if (pending) "suspended" else ""
                     val messages = data.optJSONArray("messages") ?: return@launch
                     restoreItems(messages)
                     running = false
-                    status = ""
+                    taskState = TaskCardState(
+                        goal = items.lastOrNull { it.role == "user" }?.text ?: "",
+                        status = if (pending) "suspended" else "idle",
+                        tokens = totalTokens,
+                        mode = mode,
+                        model = activeModel?.model?.id ?: "",
+                        costUsd = sessionUsage.costUsd.takeIf { it > 0 },
+                    )
                 }
             },
             onNew = {
@@ -1171,17 +1213,21 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
             onDismissRequest = { showDiscardConfirm = false },
             title = { Text("放弃暂停的任务？") },
             text = {
-                Text("当前有已暂停的任务。新建会话会丢弃它的检查点，之后无法继续该任务。")
+                Text("当前会话有已暂停的任务。新建会话不会自动丢弃它：选择“保留”后，原会话的检查点仍可随时继续；选择“放弃”则永久删除。")
             },
             confirmButton = {
+                // 默认安全语义：保留检查点（旧会话里仍可“继续”），新会话干净开始。
                 TextButton(onClick = {
-                    api?.clearPendingTask()
+                    showDiscardConfirm = false
+                    newSession()
+                }) { Text("保留并新建") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    api?.clearPendingTask(sessionId)
                     showDiscardConfirm = false
                     newSession()
                 }) { Text("放弃并新建", color = YayaColors.StatusError) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDiscardConfirm = false }) { Text("取消") }
             },
         )
     }
@@ -1210,7 +1256,7 @@ fun ChatScreen(onOpenDrawer: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
                     attachments.clear()
                     viewingImage = null
                     queue.clear()
-                    api?.clearPendingTask()
+                    api?.clearPendingTask(sessionId)
                     suspended = false
                     restoreItems(messages)
                     running = false

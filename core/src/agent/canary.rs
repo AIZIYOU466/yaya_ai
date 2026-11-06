@@ -43,6 +43,7 @@ pub fn run(
             degrade_state: None,
             base_url: None,
             loop_state: None,
+            loop_state_raw: None,
             endpoints: vec![],
             preferred_endpoint: None,
             user_images: vec![],

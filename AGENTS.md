@@ -138,8 +138,12 @@
 ## R13 本地持久化（Android 侧 SQLite，零依赖）
 
 - 会话 / 消息 / 检查点由 `android/.../AgentDatabase.kt`（SQLiteOpenHelper）持久化；Rust Core 不直接落盘，但暴露可序列化状态交平台保存（任务 43）。
-- **循环光标（任务 43，2026-10-18 R13 更新，已获用户授权）**：core 暴露可序列化 `LoopState`（`stage` + `step` + `messages` + 待执行 tool_calls 游标 `pending_calls`/`pending_cursor` + degrade 快照），经 `Event::LoopState` 交平台落盘（`AgentHost` 存 `agent_state/loop_state`），恢复经 `RunConfig.loop_state` 注入续跑；检查点从「消息快照」升级为「循环光标」。存档时机：工具调用执行后（每个 tool 完成发一档）、后台中断前（stage=generate）。恢复语义：stage=tools 时从 `pending_cursor` 续跑未执行部分（已完成工具不重复执行），stage=generate 时重跑本步生成；任务 `done` 时平台清除断点，降级快照保留。序列化边界含 4C-2/4C-3 最终形态（`BehaviorHistory`：`forced_failure_count` / `canary_cooling` / `last_tool_call` 等）。
-- `AgentHost.onEvent` 同步写库（tool 消息、流式 token 累积后的 assistant 文本、system 提示）；`run()` 开始写入 user 消息并 upsert 会话，并注入 `degradeState` / `loopState`。
+- **循环光标（任务 43，2026-10-18 R13 更新，已获用户授权）**：core 暴露可序列化 `LoopState`（`stage` + `step` + `messages` + 待执行 tool_calls 游标 `pending_calls`/`pending_cursor` + degrade 快照），经 `Event::LoopState` 交平台落盘（`AgentHost` 存 `agent_state/loop_state_<sessionId>`），恢复经 `RunConfig.loop_state_raw` 注入续跑；检查点从「消息快照」升级为「循环光标」。存档时机：工具调用执行后（每个 tool 完成发一档）、后台中断前（stage=generate）。恢复语义：stage=tools 时从 `pending_cursor` 续跑未执行部分（已完成工具不重复执行），stage=generate 时重跑本步生成；任务 `done` 时平台清除断点，降级快照保留。序列化边界含 4C-2/4C-3 最终形态（`BehaviorHistory`：`forced_failure_count` / `canary_cooling` / `last_tool_call` 等）。
+  - **按会话隔离（2026-11-06）**：检查点 key 为 `loop_state_<sessionId>`（旧全局 `loop_state` ± `loop_state_sid` 归属标记仅作一次性迁移）；`run()` **永不**注入检查点，只有 `resume(sessionId)` 注入本会话的——从机制上避免“新会话续跑旧任务”串台，UI 也就不必再禁止暂停期间切换会话。
+  - **有界存档（2026-11-06）**：存档前裁剪——图片 `data:` URL 改占位符 `checkpoint:image-omitted`，单条文本超 32 KB 截断并附标记；整份 JSON 超 2 MB 则**不落盘**并发 `Notice`（tag `checkpoint:skipped`）显式告知“任务可继续但不可恢复”。
+  - **恢复失败不静默**：检查点缺失/损坏/超限时由 `resume` 返回明确错误（不再拿空 prompt 发请求）；`error` 事件保留检查点，用户可“继续”重试或显式“放弃”。
+  - **崩溃可追溯**：Android 构建保留 `panic=abort`（容器 NDK 无可用 libunwind），但 JNI 安装 `panic::set_hook`：panic 信息写 logcat 与 `filesDir/agent_state/crash.log`，下次启动由 `AgentApi.consumeCrashReport` 取出并呈现（绝不静默消失）。
+- `AgentHost.onEvent` 同步写库（tool 消息、流式 token 累积后的 assistant 文本、system 提示）；`run()` 开始写入 user 消息并 upsert 会话，并注入 `degradeState`（不注入 `loopState`）；`resume()` 额外注入本会话 `loopStateRaw`。检查点写入有大小上限（见上），超限跳过并提示。
 - 每次工具调用执行前自动保存一次检查点（消息快照），UI 可回滚到任意检查点并继续（保留；循环光标是续跑机制，检查点仍是回滚 UI）。
 - 进程被杀后重启：UI 经 `AgentApi.loadRecentSession` 恢复最近会话展示；任务续跑由 `loop_state` 断点恢复。
 - 表结构：`sessions` / `messages` / `checkpoints` / `memories`；版本管理用 `DB_VERSION` + `onUpgrade` 逐级迁移（见 `AgentDatabase`）。

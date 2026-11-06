@@ -10,6 +10,7 @@ import android.os.Build
 import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.util.UUID
 
 /**
@@ -40,6 +41,12 @@ class AgentHost(
         private const val AGENT_CHANNEL_ID = "yaya_agent"
         /** 授权等待上限：超时按拒绝处理（安全默认）。 */
         private const val APPROVAL_TIMEOUT_MS = 5 * 60 * 1000L
+        private const val PREFS_AGENT = "agent_state"
+        /** 旧版全局检查点 key（单会话时代）：仅用于一次性迁移读取。 */
+        private const val KEY_LOOP_LEGACY = "loop_state"
+        private const val KEY_LOOP_PREFIX = "loop_state_"
+        /** 检查点大小上限（字符 ≈ 字节）：超过则不落盘并明确告知（任务 27/43）。 */
+        private const val MAX_CHECKPOINT_CHARS = 2 * 1024 * 1024
         private val libLoaded: Boolean = try {
             System.loadLibrary("yaya_core_jni")
             true
@@ -132,25 +139,26 @@ class AgentHost(
             db.insertMessage(taskId, "user", prompt, true, images.toString())
         }
         syncMcpServers(configJson)
-        return runNative(taskId, prompt, configJson)
+        return runNative(taskId, prompt, configJson, null)
     }
 
     /**
      * 从循环光标续跑挂起任务（任务 27/43）：不写入新的 user 消息，
      * core 用检查点 messages 续跑；无断点时显式报错（不静默新开空任务）。
+     *
+     * 检查点按会话隔离（`loop_state_<sessionId>`），所以 A 会话暂停不会阻塞 B 会话。
      */
     fun resume(taskId: String, configJson: String): String {
         if (!libLoaded) {
             return "ERROR: Rust Core 库 libyaya_core_jni.so 未加载（需 scripts/build-android.sh 交叉编译）"
         }
-        val prefs = try {
-            context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
-        } catch (_: Exception) {
-            null
-        }
-        val loopJson = try { prefs?.getString("loop_state", null) } catch (_: Exception) { null }
+        val loopJson = loadCheckpoint(taskId)
         if (loopJson.isNullOrEmpty()) {
-            return "ERROR: 当前没有可恢复的任务断点"
+            return "ERROR: 当前会话没有可恢复的任务断点"
+        }
+        if (loopJson.length > MAX_CHECKPOINT_CHARS) {
+            clearPendingTask(taskId)
+            return "ERROR: 检查点过大（${loopJson.length / 1024} KB），已丢弃；请重新开始该任务"
         }
         currentSessionId = taskId
         assistantBuffer.setLength(0)
@@ -159,7 +167,7 @@ class AgentHost(
         priceOutputPerM = try { JSONObject(configJson).optDouble("outputCostPerM", 0.0) } catch (_: Exception) { 0.0 }
         syncMcpServers(configJson)
         if (libLoaded) nativeClearSuspend()
-        return runNative(taskId, "", configJson)
+        return runNative(taskId, "", configJson, loopJson)
     }
 
     /** 请求挂起当前任务（下一个循环边界保存检查点并暂停，不丢弃）。 */
@@ -167,45 +175,86 @@ class AgentHost(
         if (libLoaded) nativeSuspend()
     }
 
-    /** 是否存在可恢复的任务断点（任务 27：冷启动后恢复“已暂停”状态）。 */
-    fun hasPendingTask(): Boolean = try {
-        val prefs = context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
-        !prefs.getString("loop_state", null).isNullOrEmpty()
-    } catch (_: Exception) {
-        false
-    }
+    /** 是否存在本会话可恢复的任务断点（任务 27：冷启动后恢复“已暂停”状态）。 */
+    fun hasPendingTask(sessionId: String): Boolean = !loadCheckpoint(sessionId).isNullOrEmpty()
 
-    /** 丢弃断点（用户明确放弃暂停任务 / 回滚检查点）。 */
-    fun clearPendingTask() {
+    /** 丢弃本会话断点（用户明确放弃暂停任务 / 回滚检查点）。 */
+    fun clearPendingTask(sessionId: String) {
         try {
-            context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
-                .edit().remove("loop_state").apply()
+            val p = prefsAgent()
+            p.edit().remove(loopKey(sessionId)).apply()
+            if (p.getString("loop_state_sid", null) == sessionId) {
+                p.edit().remove(KEY_LOOP_LEGACY).remove("loop_state_sid").apply()
+            }
         } catch (_: Exception) {
         }
     }
 
-    // 注入降级状态（commit 2）与循环光标（任务 43）：上次任务落盘的快照，
-    // 让 Rust core 跨任务延续端点质量记忆（非法/缺失回退 Full，安全默认），
-    // 并从断点续跑（已执行工具不重复）。
-    private fun runNative(taskId: String, prompt: String, configJson: String): String {
-        val prefs = try {
-            context.getSharedPreferences("agent_state", Context.MODE_PRIVATE)
+    private fun prefsAgent() =
+        context.getSharedPreferences(PREFS_AGENT, Context.MODE_PRIVATE)
+
+    private fun loopKey(sessionId: String) = "$KEY_LOOP_PREFIX$sessionId"
+
+    /**
+     * 读取本会话检查点：优先 per-session key；旧版全局 `loop_state` 仅在确认
+     * 属于同一会话（或无归属标记）时一次性迁移，避免跨会话串台续跑旧任务。
+     */
+    private fun loadCheckpoint(sessionId: String): String? {
+        if (sessionId.isEmpty()) return null
+        return try {
+            val p = prefsAgent()
+            p.getString(loopKey(sessionId), null)?.takeIf { it.isNotEmpty() }?.let { return it }
+            val legacy = p.getString(KEY_LOOP_LEGACY, null)?.takeIf { it.isNotEmpty() } ?: return null
+            val owner = p.getString("loop_state_sid", null)
+            if (owner == null || owner == sessionId) {
+                p.edit().putString(loopKey(sessionId), legacy).remove(KEY_LOOP_LEGACY).apply()
+                legacy
+            } else {
+                null
+            }
         } catch (_: Exception) {
             null
         }
-        val degradeJson = try { prefs?.getString("degrade_state", null) } catch (_: Exception) { null }
-        val loopJson = try { prefs?.getString("loop_state", null) } catch (_: Exception) { null }
-        val configWithState = if (degradeJson.isNullOrEmpty() && loopJson.isNullOrEmpty()) {
+    }
+
+    /** 上次进程异常终止（Rust panic / native abort）的原因；读到即清除供 UI 展示。 */
+    fun consumeCrashReport(): String? = try {
+        val f = crashJournal()
+        if (!f.isFile) null
+        else {
+            val text = f.readText().trim()
+            f.delete()
+            text.ifEmpty { null }
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun crashJournal(): File =
+        File(File(context.filesDir, "agent_state"), "crash.log")
+
+    // 注入降级状态（commit 2）与循环光标（任务 43）：上次任务落盘的快照，
+    // 让 Rust core 跨任务延续端点质量记忆（非法/缺失回退 Full，安全默认）。
+    // 检查点仅在 resume 时注入：新任务绝不能“续跑”别的任务残留的光标。
+    private fun runNative(
+        taskId: String,
+        prompt: String,
+        configJson: String,
+        checkpoint: String?,
+    ): String {
+        val degradeJson = try {
+            prefsAgent().getString("degrade_state", null)
+        } catch (_: Exception) {
+            null
+        }
+        val configWithState = try {
+            val obj = JSONObject(configJson)
+            if (!checkpoint.isNullOrEmpty()) obj.put("loopStateRaw", checkpoint)
+            if (!degradeJson.isNullOrEmpty()) obj.put("degradeState", JSONArray(degradeJson))
+            obj.put("loopJournal", crashJournal().absolutePath)
+            obj.toString()
+        } catch (_: Exception) {
             configJson
-        } else {
-            try {
-                val obj = JSONObject(configJson)
-                if (!degradeJson.isNullOrEmpty()) obj.put("degradeState", JSONArray(degradeJson))
-                if (!loopJson.isNullOrEmpty()) obj.put("loopState", JSONObject(loopJson))
-                obj.toString()
-            } catch (_: Exception) {
-                configJson
-            }
         }
         return nativeRunLoop(taskId, prompt, configWithState, this)
     }
@@ -426,7 +475,12 @@ class AgentHost(
     }
 
     fun onEvent(json: String) {
-        eventSink(json)
+        try {
+            eventSink(json)
+        } catch (t: Throwable) {
+            // UI 侧处理失败不得拖死 Agent 线程（更不能静默杀进程）。
+            Log.e(TAG, "事件回调失败: ${t.message}", t)
+        }
         persistEvent(json)
     }
 
@@ -434,8 +488,7 @@ class AgentHost(
     private fun persistEvent(json: String) {
         val sid = currentSessionId ?: return
         val db = database ?: return
-        try {
-            val ev = JSONObject(json)
+        try {            val ev = JSONObject(json)
             when (ev.optString("type")) {
                 "tool_call" -> {
                     val args = ev.opt("args")
@@ -458,11 +511,18 @@ class AgentHost(
                         .apply()
                 }
                 "loop_state" -> {
-                    // 循环光标检查点（任务 43）：工具执行后 core 发来，落盘供下次 run 断点续跑。
-                    context.getSharedPreferences("agent_state", android.content.Context.MODE_PRIVATE)
-                        .edit()
-                        .putString("loop_state", ev.optString("state"))
-                        .apply()
+                    // 循环光标检查点（任务 43）：按会话落盘，仅该会话 resume 时注入。
+                    val state = ev.optString("state")
+                    val owner = currentSessionId
+                    if (owner != null && state.isNotEmpty()) {
+                        if (state.length > MAX_CHECKPOINT_CHARS) {
+                            Log.w(TAG, "检查点过大（${state.length / 1024} KB），已跳过存档")
+                        } else {
+                            prefsAgent().edit()
+                                .putString("$KEY_LOOP_PREFIX$owner", state)
+                                .apply()
+                        }
+                    }
                 }
                 "token" -> {
                     assistantBuffer.append(ev.optString("text"))
@@ -495,11 +555,8 @@ class AgentHost(
                     db.insertMessage(sid, "policy", "$verdict: $name — $reason", true)
                 }
                 "done" -> {
-                    // 任务成功收尾：清除断点（无需再恢复），降级快照保留跨任务延续。
-                    context.getSharedPreferences("agent_state", android.content.Context.MODE_PRIVATE)
-                        .edit()
-                        .remove("loop_state")
-                        .apply()
+                    // 任务成功收尾：清除本会话断点（无需再恢复），降级快照保留跨任务延续。
+                    currentSessionId?.let { clearPendingTask(it) }
                     flushAssistant()
                     flushUsage()
                 }
@@ -510,11 +567,8 @@ class AgentHost(
                     usageBuffer.clear()
                 }
                 "error" -> {
-                    // 失败是终态：清除断点，避免下一次任务意外续跑失败步骤。
-                    context.getSharedPreferences("agent_state", android.content.Context.MODE_PRIVATE)
-                        .edit()
-                        .remove("loop_state")
-                        .apply()
+                    // 失败保留断点：用户可“继续”重试或显式放弃（clearPendingTask）。
+                    // 仅当错误本身表明检查点不可用（过大/损坏）时才由 resume 侧清除。
                     flushAssistant()
                     flushUsage()
                     db.insertMessage(sid, "system", "错误: ${ev.optString("message")}", false)
